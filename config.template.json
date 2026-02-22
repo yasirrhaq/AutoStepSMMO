@@ -1,0 +1,47 @@
+{
+  "_comment": "Configuration Template - Copy to config.json and fill in your credentials",
+
+  "base_url": "https://web.simple-mmo.com",
+
+  "_authentication": "Choose ONE authentication method below:",
+
+  "_method1": "Email/Password (traditional login)",
+  "email": "",
+  "password": "",
+
+  "_method2": "Session Token (for Google/OAuth login - see SESSION_TOKEN_GUIDE.md)",
+  "session_token": "",
+  "xsrf_token": "",
+  "api_token": "",
+
+
+  "auto_travel": true,
+  "debug_mode": false,
+  "auto_battle_npcs": true,
+
+  "travel_delay_min": 15,
+  "travel_delay_max": 18,
+
+  "enable_random_delays": true,
+
+  "_captcha_settings": "CAPTCHA auto-solve (TESTING ONLY - requires PIL + pytesseract)",
+  "auto_solve_captcha": true,
+  "captcha_random_fallback": false,
+
+  "_npc_settings": "Automatically battle NPCs encountered during travel",
+  "auto_battle_npcs": true,
+
+  "_warnings": "Only use auto_solve_captcha on test accounts!",
+
+  "_notes": {
+    "base_url": "The base URL of your SimpleMMO instance",
+    "email": "Your account email (leave blank if using session_token)",
+    "password": "Your account password (leave blank if using session_token)",
+    "session_token": "Browser session cookie value (for OAuth users)",
+    "auto_travel": "Enable auto-travel feature",
+    "travel_delay_min": "Minimum seconds to wait between travel actions",
+    "travel_delay_max": "Maximum seconds to wait between travel actions",
+    "enable_random_delays": "Use random delays between min/max (more human-like)",
+    "_instructions": "If you use Google login, see SESSION_TOKEN_GUIDE.md"
+  }
+}
