@@ -55,23 +55,32 @@ class AFK24x7Bot:
         # Calculate current segment uptime
         current_segment_uptime = (datetime.now() - self.segment_start_time).total_seconds()
         current_segment_minutes = int(current_segment_uptime / 60)
+        current_segment_seconds = int(current_segment_uptime % 60)
+        
+        # Format current segment: show seconds if < 1 minute
+        if current_segment_minutes == 0:
+            current_segment_str = f"{current_segment_seconds}s"
+        else:
+            current_segment_str = f"{current_segment_minutes}m"
         
         # Calculate total uptime (all completed segments + current segment)
         total_uptime_seconds = sum(self.uptime_segments) + current_segment_uptime
-        total_uptime_minutes = int(total_uptime_seconds / 60)
         
-        # Format total uptime as hours/minutes if > 60 minutes
-        if total_uptime_minutes >= 60:
-            total_hours = total_uptime_minutes // 60
-            total_mins = total_uptime_minutes % 60
-            total_uptime_str = f"{total_hours} h {total_mins}m"
+        # Format total uptime with hours, minutes, seconds
+        total_hours = int(total_uptime_seconds // 3600)
+        total_mins = int((total_uptime_seconds % 3600) // 60)
+        total_secs = int(total_uptime_seconds % 60)
+        
+        # Build total uptime string (only show hours if > 0)
+        if total_hours > 0:
+            total_uptime_str = f"{total_hours}h {total_mins}m {total_secs}s"
         else:
-            total_uptime_str = f"{total_uptime_minutes}m"
+            total_uptime_str = f"{total_mins}m {total_secs}s"
         
         print(f"\n{'='*60}")
         print(f"📊 24/7 AFK MODE - SESSION STATS")
         print(f"{'='*60}")
-        print(f"⏱️  Uptime #{self.current_segment_number}: {current_segment_minutes}m")
+        print(f"⏱️  Uptime #{self.current_segment_number}: {current_segment_str}")
         print(f"⏱️  Total Uptime: {total_uptime_str}")
         print(f"✅ Travels: {self.stats['travels_completed']}")
         print(f"💫 Total EXP: {self.stats['total_exp']:,}")
@@ -185,15 +194,6 @@ class AFK24x7Bot:
                 if result.get("success"):
                     self.stats['travels_completed'] += 1
                     consecutive_errors = 0  # Reset error counter on success
-                    
-                    # Check if we completed a 10-travel segment
-                    if self.stats['travels_completed'] % 10 == 0:
-                        # Save current segment duration
-                        segment_duration = (datetime.now() - self.segment_start_time).total_seconds()
-                        self.uptime_segments.append(segment_duration)
-                        # Start new segment
-                        self.current_segment_number += 1
-                        self.segment_start_time = datetime.now()
                     
                     parsed = result.get("parsed", {})
                     
@@ -334,6 +334,12 @@ class AFK24x7Bot:
                     # Display full stats every 10 travels
                     if self.stats['travels_completed'] % 10 == 0:
                         self.print_stats()
+                        
+                        # Close completed segment and start new one
+                        segment_duration = (datetime.now() - self.segment_start_time).total_seconds()
+                        self.uptime_segments.append(segment_duration)
+                        self.current_segment_number += 1
+                        self.segment_start_time = datetime.now()
                     
                     # Take random breaks to look human
                     if self.stats['travels_completed'] % self.travels_before_break == 0:
