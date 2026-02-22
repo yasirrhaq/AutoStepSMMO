@@ -81,10 +81,12 @@ class AFK24x7Bot:
         print(f"⚠️  Errors Recovered: {self.stats['errors']}")
         print(f"🔄 Bot Restarts: {self.stats['restarts']}")
         
-        if hours > 0:
-            travels_per_hour = self.stats['travels_completed'] / hours
-            exp_per_hour = self.stats['total_exp'] / hours
-            gold_per_hour = self.stats['total_gold'] / hours
+        # Calculate rates using total uptime in hours
+        total_uptime_hours = total_uptime_seconds / 3600
+        if total_uptime_hours > 0:
+            travels_per_hour = self.stats['travels_completed'] / total_uptime_hours
+            exp_per_hour = self.stats['total_exp'] / total_uptime_hours
+            gold_per_hour = self.stats['total_gold'] / total_uptime_hours
             print(f"📈 Rate: {travels_per_hour:.1f} travels/hour")
             print(f"📈 Rate: {exp_per_hour:.0f} EXP/hour, {gold_per_hour:.0f} gold/hour")
         
