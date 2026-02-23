@@ -14,7 +14,7 @@
   "xsrf_token": "",
   "api_token": "",
 
-"auto_travel": true,
+  "auto_travel": true,
   "debug_mode": false,
   "auto_battle_npcs": true,
   "auto_gather_materials": true,
@@ -27,6 +27,8 @@
   "_captcha_settings": "CAPTCHA auto-solve (TESTING ONLY - requires PIL + pytesseract)",
   "auto_solve_captcha": true,
   "captcha_random_fallback": false,
+  "_auto_training_note": "Set auto_captcha_training=false to stop model retraining until you manually review captcha_learning/failures/",
+  "auto_captcha_training": false,
 
   "_npc_settings": "Automatically battle NPCs encountered during travel",
   "auto_battle_npcs": true,
@@ -38,20 +40,28 @@
 
   "_warnings": "Only use auto_solve_captcha on test accounts!",
 
+  "_quest_settings": "Settings for the Quest Runner bot (quest_runner.py)",
+  "quest": {
+    "delay_between_steps_min": 2,
+    "delay_between_steps_max": 4,
+    "delay_between_quests_min": 3,
+    "delay_between_quests_max": 6,
+    "qp_poll_interval": 60,
+    "error_retry_delay": 10
+  },
   "_battle_arena_settings": "Settings for the Battle Arena bot (battle_arena_bot.py)",
   "battle_arena": {
-    "min_bp": 2,
+    "min_bp": 1,
     "generation_cost": 13750,
     "gold_buffer": 0,
     "wait_when_broke": true,
     "wait_minutes_low_resources": 15,
-    "wait_minutes_low_energy": 2,
+    "wait_minutes_low_energy": 2.5,
     "max_attacks_per_npc": 100,
     "attack_delay": 1.0,
     "between_fight_delay": 5,
     "max_wins": 0
   },
-
   "_notes": {
     "base_url": "The base URL of your SimpleMMO instance",
     "email": "Your account email (leave blank if using session_token)",
