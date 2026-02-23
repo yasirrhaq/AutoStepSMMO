@@ -596,108 +596,249 @@ class SimpleMMOBot:
             self.logger.debug(traceback.format_exc())
         
         return results
-    
-    def salvage_material(self, material_session_id: int, quantity: int = None, material_name: str = None) -> Dict[str, Any]:
-        """Salvage/gather materials encountered during travel
-        
-        Args:
-            material_session_id: The session ID for the material encounter
-            quantity: Amount to salvage (default: all available)
-            material_name: Name of the material (for logging)
-            
-        Returns:
-            Dict with success status and rewards
+
+    # ── Gathering helpers ────────────────────────────────────────────────────
+
+    def _extract_gathering_urls(self, html: str) -> dict:
+        """
+        Extract the signed gathering API URLs and session ID from a travel page.
+
+        SimpleMMO embeds signed URLs in the page HTML (same \/\ JSON-escape
+        pattern as NPC attack URLs).  Three attempts per URL:
+          1. Plain absolute URL
+          2. JSON-escaped (backslash-slashes + \u0026 ampersand)
+          3. Relative path with query-string components
+
+        Returns dict: {session_id, info_url, gather_url} — all may be None.
+        """
+        import re as _re
+        result = {"session_id": None, "info_url": None, "gather_url": None}
+
+        # ── Session ID ──────────────────────────────────────────────────────
+        for pat in [
+            r'material_session_id[\s\'"]*:\s*(\d+)',      # JS/x-data: key: value
+            r'material_session_id\D{0,15}?(\d+)',
+            r'materialSessionId\D{0,15}?(\d+)',
+            r'gathering_session_id\D{0,15}?(\d+)',
+            r'gatheringSessionId\D{0,15}?(\d+)',
+            r'"id"\s*:\s*(\d{7,})',                        # numeric id ≥ 7 digits
+        ]:
+            m = _re.search(pat, html, _re.IGNORECASE)
+            if m:
+                result["session_id"] = int(m.group(m.lastindex))
+                break
+
+        WB = self.base_url  # https://web.simple-mmo.com
+
+        # ── Helper to build URL from 3-pattern match ─────────────────────
+        def _find_url(endpoint: str) -> str | None:
+            ep_esc = endpoint.replace("/", "\\/")
+            # Pattern 1: plain absolute URL
+            m = _re.search(
+                rf'({re.escape(WB)}/{re.escape(endpoint)}'
+                rf'\?expires=\d+&(?:amp;)?signature=[a-f0-9]+)',
+                html,
+            )
+            if m:
+                return m.group(1).replace("&amp;", "&")
+            # Pattern 2: JSON-escaped
+            m = _re.search(
+                rf'https:\\/\\/web\.simple-mmo\.com\\/{ep_esc}'
+                rf'\?expires=(\d+)(?:\\u0026|&(?:amp;)?)signature=([a-f0-9]+)',
+                html,
+            )
+            if m:
+                return f"{WB}/{endpoint}?expires={m.group(1)}&signature={m.group(2)}"
+            # Pattern 3: relative path with query string
+            seg = endpoint.split("/")[-1]  # e.g. "gather" or "information"
+            m = _re.search(
+                rf'gathering/material/{_re.escape(seg)}[^?]*\?expires=(\d+)&(?:amp;)?signature=([a-f0-9]+)',
+                html,
+            )
+            if m:
+                return f"{WB}/api/gathering/material/{seg}?expires={m.group(1)}&signature={m.group(2)}"
+            return None
+
+        result["info_url"]   = _find_url("api/gathering/material/information")
+        result["gather_url"] = _find_url("api/gathering/material/gather")
+
+        self.logger.debug(
+            f"[Gathering URLs] session_id={result['session_id']}  "
+            f"info={'found' if result['info_url'] else 'missing'}  "
+            f"gather={'found' if result['gather_url'] else 'missing'}"
+        )
+        return result
+
+    def salvage_material(
+        self,
+        material_session_id: int,
+        quantity: int = None,
+        material_name: str = None,
+        page_html: str = None,
+    ) -> Dict[str, Any]:
+        """
+        Gather materials using the signed API URLs extracted from the travel page.
+
+        Steps:
+          1. If no page_html given, re-fetch /travel (to get signed URLs).
+          2. Extract signed information + gather URLs via _extract_gathering_urls.
+          3. POST information endpoint → verify energy, equipment, get quantity.
+          4. POST gather endpoint with JSON body {quantity, id}.
+          5. Parse EXP/items from response and return.
         """
         if not self.logged_in:
-            self.logger.error("Not logged in")
             return {"success": False, "error": "Not logged in"}
-        
         if not material_session_id:
-            item_info = f" '{material_name}'" if material_name else ""
-            self.logger.error(f"Cannot salvage material{item_info}: Invalid session ID (None)")
             return {"success": False, "error": "Invalid material session ID"}
-        
-        try:
-            # API endpoint for gathering/salvaging materials
-            gather_url = f"{self.base_url}/api/gathering/material/gather"
-            
-            # If quantity not specified, get info first to determine max quantity
-            if quantity is None:
-                info_url = f"{self.base_url}/api/gathering/material/information"
-                # This endpoint might need material_session_id as query param
-                info_response = self.session.get(info_url, params={"id": material_session_id})
-                if info_response.status_code == 200:
-                    info_data = info_response.json()
-                    quantity = info_data.get("quantity", info_data.get("amount", 1))
-                else:
-                    quantity = 1  # Fallback
-            
-            item_info = f" '{material_name}'" if material_name else ""
-            self.logger.info(f"Salvaging material{item_info} (session_id: {material_session_id}, quantity: {quantity})")
-            
-            # POST request to salvage — use form-encoded data (not JSON)
-            headers = {
-                'X-XSRF-TOKEN': self.csrf_token,
-                'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8',
-                'Accept': 'application/json',
-                'Origin': 'https://web.simple-mmo.com',
-                'Referer': f'{self.base_url}/travel',
-            }
-            if self.api_token:
-                headers['Authorization'] = f'Bearer {self.api_token}'
 
-            payload = {
-                'material_session_id': material_session_id,
-                'id': material_session_id,  # some endpoints use 'id'
-                'quantity': quantity
+        import re as _re
+
+        try:
+            # ── Step 1: get page HTML if not supplied ─────────────────────
+            if page_html is None:
+                self.logger.debug("salvage_material: fetching /travel for signed URLs")
+                pr = self.session.get(
+                    f"{self.base_url}/travel", allow_redirects=True, timeout=10
+                )
+                page_html = pr.text if pr.status_code == 200 else ""
+
+            # ── Step 2: extract signed URLs ───────────────────────────────
+            g = self._extract_gathering_urls(page_html)
+            info_url   = g["info_url"]
+            gather_url = g["gather_url"]
+
+            # Override session_id if we extracted a more reliable one from HTML
+            if g["session_id"] and not material_session_id:
+                material_session_id = g["session_id"]
+
+            api_headers = {
+                "X-XSRF-TOKEN": self.csrf_token,
+                "Content-Type": "application/json",
+                "Accept":        "application/json",
+                "Origin":        self.base_url,
+                "Referer":       f"{self.base_url}/travel",
             }
-            
-            response = self.session.post(gather_url, headers=headers, data=payload)
-            
-            if response.status_code == 200:
-                data = response.json()
-                
-                # Check if gathering actually succeeded
-                status = data.get("status", "").lower()
-                if (status == "success"
-                        or data.get("type") == "success"
-                        or data.get("success") is True
-                        or status not in ("", "error", "fail", "failed")):
-                    # Parse rewards from salvage
-                    result = {
-                        "success": True,
-                        "exp": data.get("exp_amount", data.get("exp", 0)),
-                        "gold": data.get("gold_amount", data.get("gold", 0)),
-                        "items": data.get("items", []),
-                        "message": data.get("message", "Material salvaged"),
-                        "energy_used": data.get("energy_points", {}).get("current", 0)
-                    }
-                    
-                    self.logger.info(f"Salvage completed: +{result['exp']} EXP, +{result['gold']} gold, {len(result['items'])} items")
-                    return result
-                else:
-                    # Gathering failed - check for energy/stamina issues
-                    error_msg = data.get("message", data.get("error", "Unknown error"))
-                    insufficient_energy = any(word in error_msg.lower() for word in ["energy", "stamina", "not enough", "insufficient"])
-                    
-                    self.logger.warning(f"Salvage failed: {error_msg}")
-                    return {
-                        "success": False,
-                        "error": error_msg,
-                        "insufficient_energy": insufficient_energy
-                    }
-            else:
-                item_info = f" '{material_name}'" if material_name else ""
-                self.logger.error(f"Salvage failed{item_info}: HTTP {response.status_code}")
+
+            # ── Step 3: information endpoint ──────────────────────────────
+            if info_url:
                 try:
-                    error_data = response.json()
-                    error_msg = error_data.get("message", f"HTTP {response.status_code}")
-                except:
-                    error_msg = f"HTTP {response.status_code}"
-                return {"success": False, "error": error_msg}
-                
+                    ir = self.session.post(
+                        info_url,
+                        headers=api_headers,
+                        json={"material_session_id": material_session_id},
+                        timeout=10,
+                    )
+                    if ir.status_code == 200:
+                        info_data = ir.json()
+                        session_data = info_data.get("material_session") or {}
+                        mat          = session_data.get("material") or {}
+
+                        # Fill in name / quantity from info response if not already known
+                        if material_name is None:
+                            material_name = mat.get("name") or session_data.get("item", {}).get("formatted_name")
+                            if material_name:
+                                # strip HTML tags if name came from formatted_name
+                                material_name = _re.sub(r'<[^>]+>', '', material_name)
+
+                        if quantity is None:
+                            quantity = session_data.get("amount", 1)
+
+                        action_name = session_data.get("action_name", "Gather")
+
+                        # Check energy availability
+                        ep = info_data.get("energy_points") or {}
+                        if ep.get("current", 1) < 1:
+                            self.logger.warning("Not enough energy for gathering")
+                            return {"success": False, "error": "No energy for gathering", "insufficient_energy": True}
+
+                        # Check equipment
+                        if session_data.get("correct_equipment") is False:
+                            self.logger.warning("Missing required equipment for gathering")
+                            return {"success": False, "error": f"Missing required tool for {mat.get('item_type', 'gathering')}", "insufficient_energy": False}
+
+                        # Check level requirement
+                        if session_data.get("is_too_low_level") is True:
+                            self.logger.warning("Player level too low for this material")
+                            return {"success": False, "error": "Level too low for this material"}
+
+                        self.logger.info(
+                            f"{action_name}: {material_name or 'material'} "
+                            f"x{quantity}  energy={ep.get('current')}/{ep.get('max')}"
+                        )
+                    else:
+                        self.logger.warning(f"Info endpoint HTTP {ir.status_code} — proceeding anyway")
+                        if quantity is None:
+                            quantity = 1
+                except Exception as ie:
+                    self.logger.warning(f"Info endpoint error: {ie} — proceeding anyway")
+                    if quantity is None:
+                        quantity = 1
+            else:
+                self.logger.warning("No signed info URL found — skipping pre-check")
+                if quantity is None:
+                    quantity = 1
+
+            # ── Step 4: gather endpoint ───────────────────────────────────
+            if not gather_url:
+                self.logger.error(
+                    f"No signed gather URL found in page HTML (len={len(page_html)}).  "
+                    f"Cannot gather {material_name or 'material'} (session={material_session_id})."
+                )
+                return {"success": False, "error": "Could not find signed gather URL in page"}
+
+            label = f"'{material_name}'" if material_name else f"session={material_session_id}"
+            self.logger.info(f"Gathering {label} x{quantity}")
+
+            gr = self.session.post(
+                gather_url,
+                headers=api_headers,
+                json={"quantity": quantity, "id": material_session_id},
+                timeout=15,
+            )
+
+            if gr.status_code != 200:
+                self.logger.error(f"Gather HTTP {gr.status_code}: {gr.text[:300]}")
+                return {"success": False, "error": f"HTTP {gr.status_code}"}
+
+            data = gr.json()
+
+            # ── Step 5: parse response ────────────────────────────────────
+            if data.get("type") == "success" or data.get("status") == "success":
+                # Primary field
+                exp = data.get("player_experience_gained", 0) or 0
+                # Fallback: parse from result HTML (e.g. "4,292 EXP")
+                if not exp:
+                    exp_m = _re.search(r'([\d,]+)\s*EXP', data.get("result", ""))
+                    if exp_m:
+                        exp = int(exp_m.group(1).replace(",", ""))
+
+                skill_exp = data.get("skill_experience_gained", 0) or 0
+                gold      = data.get("gold", 0) or 0
+                is_end    = data.get("is_end", True)
+
+                self.logger.info(
+                    f"Gathered {quantity}x {material_name or 'material'}: "
+                    f"+{exp} EXP  +{skill_exp} skill EXP  is_end={is_end}"
+                )
+                return {
+                    "success":   True,
+                    "exp":       exp,
+                    "skill_exp": skill_exp,
+                    "gold":      gold,
+                    "items":     [{"name": material_name or "Material", "quantity": quantity}],
+                    "message":   f"Gathered {quantity}x {material_name or 'material'}",
+                    "is_end":    is_end,
+                }
+            else:
+                raw_err = data.get("message") or data.get("result") or str(data)
+                # Strip HTML tags from error messages
+                err = _re.sub(r'<[^>]+>', '', raw_err).strip()
+                insuf = any(w in err.lower() for w in ["energy", "stamina", "not enough", "insufficient"])
+                self.logger.warning(f"Gather failed: {err}")
+                return {"success": False, "error": err, "insufficient_energy": insuf}
+
         except Exception as e:
-            self.logger.error(f"Error salvaging material: {e}")
+            self.logger.error(f"Error gathering material: {e}")
             import traceback
             self.logger.debug(traceback.format_exc())
             return {"success": False, "error": str(e)}
@@ -1830,50 +1971,33 @@ class SimpleMMOBot:
             
             import re
             # ── Pre-travel: detect pending material encounter ─────────────────
-            # Try every plausible HTML pattern for session ID
-            _session_patterns = [
-                r'material_session_id\D{0,15}?(\d+)',
-                r'materialSessionId\D{0,15}?(\d+)',
-                r'gathering_session_id\D{0,15}?(\d+)',
-                r'gatheringSessionId\D{0,15}?(\d+)',
-                r'data-(?:material|gathering)-(?:session-)?id=["\']?(\d+)',
-                r'session_id["\s:=]+["\']?(\d+)',
-            ]
-            material_session_id = None
-            for _pat in _session_patterns:
-                _m = re.search(_pat, page_html, re.IGNORECASE)
-                if _m:
-                    material_session_id = int(_m.group(1))
-                    self.logger.info(f"Pre-travel: found material session ID {material_session_id} via pattern: {_pat}")
-                    break
+            # Use _extract_gathering_urls which handles all known patterns + signed URLs
+            _pretrav_g = self._extract_gathering_urls(page_html)
+            material_session_id = _pretrav_g.get("session_id")
 
             if material_session_id:
-                self.logger.info(f"Detected material gathering opportunity (session_id: {material_session_id})")
-                
-                # Try to extract quantity and name
-                qty_match = re.search(r'Remaining Material["\s:]+(\d+)', page_html)
-                quantity = int(qty_match.group(1)) if qty_match else 1
-                
-                # Try to extract material name from HTML
-                name_match = re.search(r'material[_-]?name["\s:]+["\']([^"\'>]+)', page_html, re.IGNORECASE)
-                material_name = name_match.group(1) if name_match else None
-                
-                # Auto-gather if enabled
+                self.logger.info(
+                    f"Pre-travel: gathering encounter detected "
+                    f"(session_id={material_session_id}, "
+                    f"info={'found' if _pretrav_g['info_url'] else 'missing'}, "
+                    f"gather={'found' if _pretrav_g['gather_url'] else 'missing'})"
+                )
+                # Auto-gather if enabled — pass the already-fetched page HTML
                 if self.config.get("auto_gather_materials", True):
-                    item_info = f" '{material_name}'" if material_name else ""
-                    self.logger.info(f"Auto-gathering material{item_info} (quantity: {quantity})...")
-                    gather_result = self.salvage_material(material_session_id, quantity, material_name)
-                    
+                    self.logger.info("Auto-gathering material before travel step...")
+                    gather_result = self.salvage_material(
+                        material_session_id, page_html=page_html
+                    )
                     if gather_result.get("success"):
                         material_gather_data = gather_result
                         self.logger.info("Material gathered successfully, continuing with travel...")
                     else:
-                        # If gathering failed (e.g., not enough energy), log it but continue
                         error_msg = gather_result.get("error", "Unknown error")
                         self.logger.warning(f"Material gathering failed: {error_msg}")
-                        if "energy" in error_msg.lower() or "stamina" in error_msg.lower():
-                            self.logger.info("Not enough energy for gathering, continuing with travel...")
-                        material_gather_data = {"success": False, "error": error_msg, "insufficient_energy": True}
+                        material_gather_data = {
+                            "success": False, "error": error_msg,
+                            "insufficient_energy": gather_result.get("insufficient_energy", False),
+                        }
             
             # ── Pre-travel: detect pending NPC battle ──────────────────────────
             # Check redirect URL first, then fall back to page HTML
@@ -1957,61 +2081,41 @@ class SimpleMMOBot:
 
                     # ── If material detected but no session ID → re-fetch travel page ──
                     if parsed.get("material_encounter") and not parsed.get("material_session_id"):
-                        self.logger.info("Material detected but no session ID — re-fetching /travel page...")
+                        self.logger.info("Material encounter detected — re-fetching /travel page for signed URLs...")
                         try:
-                            tp = self.session.get(f"{self.base_url}/travel", allow_redirects=True)
+                            tp = self.session.get(
+                                f"{self.base_url}/travel", allow_redirects=True, timeout=10
+                            )
                             ph = tp.text
+                            self.logger.debug(f"[TRAVEL PAGE SNIPPET] {ph[:600]}")
 
-                            # Log first 800 chars of page so we can debug regex mismatches
-                            self.logger.debug(f"[TRAVEL PAGE SNIPPET] {ph[:800]}")
-
-                            # Try every plausible pattern for the session ID
-                            session_patterns = [
-                                r'material_session_id\D{0,15}?(\d+)',
-                                r'materialSessionId\D{0,15}?(\d+)',
-                                r'gathering_session_id\D{0,15}?(\d+)',
-                                r'gatheringSessionId\D{0,15}?(\d+)',
-                                r'data-(?:material|gathering)-(?:session-)?id=["\'](\d+)',
-                                r'/gathering/material/gather[^"\']*["\']?\s*[^"\']*?["\']?\s*(\d+)',
-                                r'"session":\s*["\']?(\d+)',
-                                r'session_id["\s:=]+["\']?(\d+)',
-                            ]
-                            sid = None
-                            for pat in session_patterns:
-                                m = _re.search(pat, ph, _re.IGNORECASE)
-                                if m:
-                                    sid = int(m.group(1))
-                                    self.logger.info(f"Found material session ID {sid} via pattern: {pat}")
-                                    break
-
-                            if sid:
-                                parsed["material_session_id"] = sid
-                                # Quantity
-                                qty_m = _re.search(r'[Rr]emaining\D{0,20}?(\d+)', ph)
-                                if qty_m:
-                                    parsed["material_quantity"] = int(qty_m.group(1))
-                                # Name
-                                name_m = _re.search(r'material[_-]?name["\s:=]+["\']([^"\'>]+)', ph, _re.IGNORECASE)
-                                if name_m:
-                                    parsed["material_name"] = name_m.group(1)
+                            g2 = self._extract_gathering_urls(ph)
+                            if g2["session_id"]:
+                                parsed["material_session_id"] = g2["session_id"]
+                                self.logger.info(f"Found material session_id={g2['session_id']} from refetched page")
                             else:
-                                self.logger.warning("Could not find material session ID on /travel page — skipping gather")
+                                self.logger.warning(
+                                    "Could not find material session ID on /travel page — skipping gather"
+                                )
                                 parsed["material_encounter"] = False
+                                ph = None
                         except Exception as e:
                             self.logger.error(f"Error re-fetching /travel for material: {e}")
                             parsed["material_encounter"] = False
+                            ph = None
+                    else:
+                        ph = None  # no re-fetch needed
 
                     # ── Gather material if we now have a session ID ──────────────
                     if parsed.get("material_encounter") and parsed.get("material_session_id") and not material_gather_data:
                         if self.config.get("auto_gather_materials", True):
                             msid = parsed["material_session_id"]
-                            mname = parsed.get("material_name")
-                            mqty  = parsed.get("material_quantity", 1)
-                            self.logger.info(f"Gathering material '{mname}' (session={msid}, qty={mqty})")
-                            gr = self.salvage_material(msid, mqty, mname)
+                            self.logger.info(f"Gathering material (session={msid})")
+                            # Pass refetched page HTML so signed URLs don't need another fetch
+                            gr = self.salvage_material(msid, page_html=ph)
                             if gr.get("success"):
                                 material_gather_data = gr
-                                self.logger.info("Material gathered from inline travel response.")
+                                self.logger.info("Material gathered after travel step.")
                             else:
                                 self.logger.warning(f"Material gather failed: {gr.get('error')}")
 

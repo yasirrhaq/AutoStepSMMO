@@ -126,39 +126,77 @@ class BattleArenaBot:
         """
         result = {"bp": None, "gold": None, "generation_cost": None}
 
-        # ── 1. JSON API endpoints — most reliable source for gold/BP ─────────
-        for api_url in [
-            f"{API_BASE}/api/user?api_token={self.bot.api_token}",
-            f"{WEB_BASE}/api/user",
-            f"{API_BASE}/api/user",
+        # ── 1a. Dedicated energy endpoint (powers the Alpine $store.current_energy) ──
+        # SimpleMMO fetches this client-side; we mirror it here before the user API call.
+        for energy_url in [
+            f"{WEB_BASE}/api/energy",
+            f"{API_BASE}/api/energy",
+            f"{WEB_BASE}/api/user/energy",
+            f"{API_BASE}/api/user/energy",
         ]:
             try:
-                r_api = self.bot.session.get(api_url, headers=self._headers(), timeout=10)
-                if r_api.status_code == 200:
-                    data = r_api.json()
-                    inner = data.get("data") or data
-                    gold_val = inner.get("gold") or data.get("gold")
-                    bp_val = (
-                        inner.get("energy")
-                        or inner.get("battle_points")
-                        or inner.get("bp")
-                        or data.get("energy")
-                        or data.get("battle_points")
-                    )
-                    if gold_val is not None:
-                        result["gold"] = int(gold_val)
-                    if bp_val is not None:
-                        result["bp"] = int(bp_val)
-                    if result["gold"] is not None and result["bp"] is not None:
+                r_e = self.bot.session.get(energy_url, headers=self._headers(), timeout=8)
+                if r_e.status_code == 200:
+                    ed = r_e.json()
+                    # Response may be: {"current": N, "max": 20} or {"energy": {"current": N}}
+                    # or {"data": {"current": N}} or just N as an integer
+                    if isinstance(ed, (int, float)):
+                        result["bp"] = int(ed)
                         break
+                    inner_e = ed.get("data") or ed.get("energy") or ed
+                    if isinstance(inner_e, dict):
+                        for _ek in ("current", "energy", "bp", "battle_points"):
+                            cur = inner_e.get(_ek)
+                            if cur is not None:
+                                result["bp"] = int(cur)
+                                break
+                        if result["bp"] is not None:
+                            break
             except Exception:
                 pass
 
+        # ── 1b. Generic user API — gold and possibly energy ──────────────────
+        if result["bp"] is None or result["gold"] is None:
+            for api_url in [
+                f"{API_BASE}/api/user?api_token={self.bot.api_token}",
+                f"{WEB_BASE}/api/user",
+                f"{API_BASE}/api/user",
+            ]:
+                try:
+                    r_api = self.bot.session.get(api_url, headers=self._headers(), timeout=10)
+                    if r_api.status_code == 200:
+                        data = r_api.json()
+                        inner = data.get("data") or data
+                        gold_val = inner.get("gold") if inner.get("gold") is not None else data.get("gold")
+                        # Use explicit None checks so energy=0 is not skipped
+                        bp_keys = ["energy", "battle_points", "bp"]
+                        bp_val = None
+                        for _k in bp_keys:
+                            v = inner.get(_k)
+                            if v is None:
+                                v = data.get(_k)
+                            if v is not None:
+                                bp_val = v
+                                break
+                        if gold_val is not None:
+                            result["gold"] = int(gold_val)
+                        if bp_val is not None:
+                            result["bp"] = int(bp_val)
+                        if result["gold"] is not None and result["bp"] is not None:
+                            break
+                except Exception:
+                    pass
+
         def _scrape_html(html: str):
             """Fallback: scrape gold/BP/generation_cost from page HTML."""
-            # ── Energy/BP ─────────────────────────────────────────────────────
+            # ── Energy/BP — try Alpine store init, then generic patterns ─────
             if result["bp"] is None:
                 for pat in [
+                    # Alpine store initialization patterns (server-rendered in <script> tags)
+                    r"Alpine\.store\s*\(\s*['\"]current_energy['\"]\s*,\s*(\d+)\s*\)",
+                    r"stores?\s*\.\s*current_energy\s*=\s*(\d+)",
+                    r"['\"]current_energy['\"]\s*:\s*(\d+)",
+                    # Generic JSON/JS patterns
                     r'"energy"\s*:\s*(\d+)',
                     r'"(?:battle_points|bp|battlePoints)"\s*:\s*(\d+)',
                     r'>\s*(\d+)\s*</span>\s*</span>\s*</button>',

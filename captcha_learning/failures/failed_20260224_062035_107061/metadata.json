@@ -1,0 +1,12 @@
+{
+  "question": "Carrot",
+  "button_clicked": 2,
+  "success": false,
+  "correct_answer": 1,
+  "timestamp": "20260224_062035_107061",
+  "datetime": "2026-02-24T06:20:35.107301",
+  "auto_labeled": true,
+  "auto_label_conf": 83.29,
+  "auto_label_tool": "base-clip-realtime",
+  "labeled_at": "2026-02-24T06:20:41.060385"
+}

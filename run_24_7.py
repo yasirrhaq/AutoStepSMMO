@@ -282,24 +282,33 @@ class AFK24x7Bot:
                     if material_gather_data:
                         if material_gather_data.get("success"):
                             self.stats['materials_gathered'] += 1
-                            gather_exp = material_gather_data.get("exp", 0)
-                            gather_gold = material_gather_data.get("gold", 0)
+                            gather_exp   = material_gather_data.get("exp", 0)
+                            gather_skill = material_gather_data.get("skill_exp", 0)
+                            gather_gold  = material_gather_data.get("gold", 0)
                             gather_items = material_gather_data.get("items", [])
+                            gather_msg   = material_gather_data.get("message", "")
                             
                             # Add to cumulative stats
-                            self.stats['total_exp'] += gather_exp
-                            self.stats['total_gold'] += gather_gold
+                            self.stats['total_exp']   += gather_exp
+                            self.stats['total_gold']  += gather_gold
                             self.stats['total_items'] += len(gather_items)
                             
                             print(f"\n{'='*60}")
                             print(f"🔨 MATERIAL GATHERED")
                             print(f"{'='*60}")
+                            if gather_msg:
+                                print(f"  📦 {gather_msg}")
                             if gather_exp > 0:
-                                print(f"  💫 +{gather_exp} EXP")
+                                print(f"  💫 +{gather_exp:,} EXP")
+                            if gather_skill > 0:
+                                print(f"  ⚒️  +{gather_skill} Skill EXP")
                             if gather_gold > 0:
                                 print(f"  💰 +{gather_gold} gold")
                             if gather_items:
-                                print(f"  🎁 +{len(gather_items)} items")
+                                for it in gather_items:
+                                    nm = it.get("name", "item") if isinstance(it, dict) else str(it)
+                                    qty = it.get("quantity", "") if isinstance(it, dict) else ""
+                                    print(f"  🎁 {qty}x {nm}" if qty else f"  🎁 {nm}")
                             print(f"{'='*60}\n")
                         elif material_gather_data.get("insufficient_energy"):
                             print(f"\n⚠️  Not enough energy for gathering - skipping...")
