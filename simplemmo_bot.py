@@ -477,7 +477,7 @@ class SimpleMMOBot:
                 # Priority 1: explicit 'type' field from API
                 material_from_type = step_type in (
                     "material", "gather", "gathering", "salvage",
-                    "materialgather", "material_gather", "item"
+                    "materialgather", "material_gather"
                 )
 
                 # Priority 2: session ID field — try every known name variant
