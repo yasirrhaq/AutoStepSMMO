@@ -1,0 +1,12 @@
+{
+  "question": "Hat",
+  "button_clicked": 2,
+  "success": false,
+  "correct_answer": 4,
+  "timestamp": "20260224_070421_586009",
+  "datetime": "2026-02-24T07:04:21.586178",
+  "auto_labeled": true,
+  "auto_label_conf": 49.91,
+  "auto_label_tool": "base-clip-realtime",
+  "labeled_at": "2026-02-24T07:04:21.715969"
+}

@@ -310,7 +310,23 @@ class AutoCaptchaLearner:
         Triggers training when:
         - At least 20 new labels since last training
         - At least 1 hour since last training (prevent too frequent training)
+        - config.json has auto_captcha_training = true (or key missing = default on)
         """
+        # ── Respect config flag ──────────────────────────────────────────────
+        try:
+            config_path = Path(__file__).parent / "config.json"
+            if config_path.exists():
+                with open(config_path, "r") as _f:
+                    _cfg = json.load(_f)
+                if not _cfg.get("auto_captcha_training", True):
+                    print(
+                        f"  ⏸️  Auto-training is DISABLED in config.json "
+                        f"(auto_captcha_training=false). "
+                        f"Review captcha_learning/failures/ then set it to true to train."
+                    )
+                    return
+        except Exception:
+            pass  # If config unreadable, fall through to normal behaviour
         MIN_LABELS_FOR_TRAINING = 20
         MIN_HOURS_BETWEEN_TRAINING = 1
         
