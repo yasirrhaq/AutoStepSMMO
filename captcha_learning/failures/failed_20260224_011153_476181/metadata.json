@@ -1,0 +1,12 @@
+{
+  "question": "Pretzel",
+  "button_clicked": 4,
+  "success": false,
+  "correct_answer": 3,
+  "timestamp": "20260224_011153_476181",
+  "datetime": "2026-02-24T01:11:53.476392",
+  "auto_labeled": true,
+  "auto_label_conf": 39.84,
+  "auto_label_tool": "base-clip-realtime",
+  "labeled_at": "2026-02-24T01:11:53.623190"
+}

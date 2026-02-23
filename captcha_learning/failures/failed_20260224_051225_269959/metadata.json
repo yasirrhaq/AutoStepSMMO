@@ -1,0 +1,12 @@
+{
+  "question": "Cheese",
+  "button_clicked": 2,
+  "success": false,
+  "correct_answer": 3,
+  "timestamp": "20260224_051225_269959",
+  "datetime": "2026-02-24T05:12:25.270170",
+  "auto_labeled": true,
+  "auto_label_conf": 63.66,
+  "auto_label_tool": "base-clip-realtime",
+  "labeled_at": "2026-02-24T05:12:25.408720"
+}

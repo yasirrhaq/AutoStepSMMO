@@ -1,0 +1,12 @@
+{
+  "question": "Frog",
+  "button_clicked": 1,
+  "success": false,
+  "correct_answer": 2,
+  "timestamp": "20260224_051422_945497",
+  "datetime": "2026-02-24T05:14:22.945709",
+  "auto_labeled": true,
+  "auto_label_conf": 89.34,
+  "auto_label_tool": "base-clip-realtime",
+  "labeled_at": "2026-02-24T05:14:23.086729"
+}

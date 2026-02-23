@@ -78,10 +78,10 @@ class BattleArenaBot:
     def _headers(self, referer: str = None) -> dict:
         h = {
             "X-XSRF-TOKEN": self.bot.csrf_token or "",
-            "Content-Type": "application/x-www-form-urlencoded;charset=UTF-8",
+            "Content-Type": "application/json",
             "Accept": "application/json",
             "Origin": WEB_BASE,
-            "Referer": referer or f"{WEB_BASE}/battle-arena",
+            "Referer": referer or f"{WEB_BASE}/battle/arena",
         }
         if self.bot.api_token:
             h["Authorization"] = f"Bearer {self.bot.api_token}"
@@ -122,65 +122,105 @@ class BattleArenaBot:
         """
         result = {"bp": None, "gold": None, "generation_cost": None}
 
-        # Try the battle arena page — embeds stats in Alpine.js data
+        def _scrape_html(html: str):
+            """Try every known pattern to pull gold, BP/energy, generation_cost out of a page."""
+            # BP: SimpleMMO uses 'energy' for battle arena energy, also 'battle_points'
+            if result["bp"] is None:
+                for pat in [
+                    r'"energy"\s*:\s*(\d+)',          # Alpine x-data: energy
+                    r'>\s*(\d+)\s*</span>\s*</span>\s*</button>',  # energy shown in button
+                    r'"(?:battle_points|bp|battlePoints)"\s*:\s*(\d+)',
+                    r'number_format\(energy\)[^\d]{0,50}>(\d+)<',
+                    r'battle.?points[^\d]+(\d+)',
+                ]:
+                    m = re.search(pat, html, re.IGNORECASE)
+                    if m:
+                        result["bp"] = int(m.group(m.lastindex))
+                        break
+
+            if result["gold"] is None:
+                for pat in [
+                    r'"gold"\s*:\s*(\d+)',
+                    r"'gold'\s*:\s*(\d+)",
+                    r'"gold":\s*"([\d,]+)"',
+                    r'x-text=["\'][^"\'>]*gold[^"\'>]*["\'][^>]*>([\d,]+)<',
+                    r'Gold[^\d]{0,30}([\d,]{4,})',   # "Gold  12,345" labels
+                ]:
+                    m = re.search(pat, html, re.IGNORECASE)
+                    if m:
+                        val = m.group(m.lastindex).replace(",", "")
+                        if val.isdigit() and int(val) > 0:
+                            result["gold"] = int(val)
+                            break
+
+            if result["generation_cost"] is None:
+                for pat in [
+                    r'"?generation_cost"?\s*[:\s]+["\']?([\d,]+)',
+                    r'I_GoldCoin[^\n]{0,200}>([\d,]+)',
+                    r'format_number\(generation_cost\)[^\n]{0,100}>([\d,]+)',
+                ]:
+                    m = re.search(pat, html, re.IGNORECASE)
+                    if m:
+                        val = m.group(m.lastindex).replace(",", "")
+                        if val.isdigit():
+                            result["generation_cost"] = int(val)
+                            break
+
+        # 1. Try the battle arena page first (has generation_cost too)
         try:
             r = self.bot.session.get(
-                f"{WEB_BASE}/battle-arena",
+                f"{WEB_BASE}/battle/arena",
                 headers={"Accept": "text/html"},
                 timeout=10,
             )
             if r.status_code == 200:
-                html = r.text
-
-                # Battle points
-                bp_match = re.search(
-                    r'"(?:battle_points|bp|battlepoints)"\s*:\s*(\d+)', html, re.IGNORECASE
-                )
-                if bp_match:
-                    result["bp"] = int(bp_match.group(1))
-
-                # Gold — shown as e.g. x-text="format_number(gold)" or "gold":12345
-                gold_match = re.search(r'"gold"\s*:\s*(\d+)', html)
-                if gold_match:
-                    result["gold"] = int(gold_match.group(1))
-
-                # Live generation cost — e.g. x-text="format_number(generation_cost)"
-                # and inline like >13,750< or generation_cost: 13750
-                cost_match = re.search(
-                    r'"?generation_cost"?\s*[:\s]+["\']?([\d,]+)', html, re.IGNORECASE
-                )
-                if cost_match:
-                    result["generation_cost"] = int(cost_match.group(1).replace(",", ""))
-                else:
-                    # Fallback: grab the number next to the gold coin icon in the generate button
-                    cost_match2 = re.search(
-                        r'I_GoldCoin[^>]+>\s*([\d,]+)', html
-                    )
-                    if cost_match2:
-                        result["generation_cost"] = int(cost_match2.group(1).replace(",", ""))
+                _scrape_html(r.text)
         except Exception as e:
-            print(f"  ⚠️  Could not fetch BA page: {e}")
+            print(f"  \u26a0\ufe0f  Could not fetch BA page: {e}")
 
-        # Fallback: user API
-        if result["bp"] is None or result["gold"] is None:
+        # 2. Fallback: travel page (always has current player stats embedded)
+        if result["gold"] is None or result["bp"] is None:
             try:
                 r2 = self.bot.session.get(
-                    f"{API_BASE}/api/user",
-                    headers=self._headers(),
+                    f"{WEB_BASE}/travel",
+                    headers={"Accept": "text/html"},
                     timeout=10,
                 )
                 if r2.status_code == 200:
-                    data = r2.json()
-                    if result["bp"] is None:
-                        result["bp"] = (
-                            data.get("battle_points")
-                            or data.get("bp")
-                            or data.get("battlePoints")
-                        )
-                    if result["gold"] is None:
-                        result["gold"] = data.get("gold")
+                    _scrape_html(r2.text)
             except Exception:
                 pass
+
+        # 3. Fallback: JSON user API endpoints
+        if result["gold"] is None or result["bp"] is None:
+            for api_url in [
+                f"{API_BASE}/api/user?api_token={self.bot.api_token}",
+                f"{WEB_BASE}/api/user",
+                f"{API_BASE}/api/user",
+            ]:
+                try:
+                    r3 = self.bot.session.get(api_url, headers=self._headers(), timeout=10)
+                    if r3.status_code == 200:
+                        data = r3.json()
+                        # Unwrap nested data key if present
+                        inner = data.get("data") or data
+                        if result["gold"] is None:
+                            result["gold"] = inner.get("gold") or data.get("gold")
+                        if result["bp"] is None:
+                            result["bp"] = (
+                                inner.get("energy")
+                                or inner.get("battle_points")
+                                or inner.get("bp")
+                                or data.get("energy")
+                                or data.get("battle_points")
+                            )
+                        if result["gold"] and result["bp"]:
+                            break
+                except Exception:
+                    pass
+
+        if result["gold"] is None and result["bp"] is None:
+            pass  # silent — shown as ? in UI
 
         # If cost still unknown, fall back to config value
         if result["generation_cost"] is None:
@@ -222,7 +262,7 @@ class BattleArenaBot:
             print(f"  🛡️  Gold buffer    : {self._fmt_number(buffer)} (kept in reserve)")
         if fights_avail is not None:
             print(f"  ⚔️  Fights afford  : {fights_avail} fight{'s' if fights_avail != 1 else ''} possible")
-        print(f"  ⚡ BP available   : {bp if bp is not None else '?'} (need {min_bp})")
+        print(f"  ⚡ Energy available : {bp if bp is not None else '?'} (need {min_bp})")
         print(f"  {'─'*50}")
 
         bp_ok   = bp   is None or bp   >= min_bp
@@ -233,7 +273,7 @@ class BattleArenaBot:
 
         reasons = []
         if not bp_ok:
-            reasons.append(f"BP too low ({bp} < {min_bp})")
+            reasons.append(f"Energy too low ({bp} < {min_bp})")
         if not gold_ok:
             shortfall = min_needed - (gold or 0)
             reasons.append(
@@ -264,9 +304,7 @@ class BattleArenaBot:
             r = self.bot.session.post(
                 f"{API_BASE}/api/battlearena/generate",
                 headers=self._headers(),
-                data={
-                    "_token": self.bot.csrf_token or "",
-                },
+                json={},
                 timeout=15,
             )
             if r.status_code == 200:
@@ -281,23 +319,141 @@ class BattleArenaBot:
             print(f"  ❌ Generate error: {e}")
             return None
 
+    def _get_ba_attack_url(self, npc_id: int) -> str:
+        """
+        GET /npcs/attack/{npc_id} and extract the signed API URL.
+
+        The *page* URL uses the numeric NPC ID.
+        The *API* URL in the page uses an obfuscated short token, e.g.:
+          /api/npcs/attack/434g3s?expires=1771968377&signature=abc...
+        The numeric npc_id only goes in the POST body, NOT the API path.
+
+        Returns the full signed URL, or best-effort unsigned fallback.
+        """
+        try:
+            r = self.bot.session.get(
+                f"{WEB_BASE}/npcs/attack/{npc_id}",
+                headers={"Accept": "text/html"},
+                timeout=10,
+            )
+            if r.status_code == 200:
+                html = r.text
+
+                # Pattern 1: plain unescaped absolute URL
+                m = re.search(
+                    r'(https://web\.simple-mmo\.com/api/npcs/attack/[A-Za-z0-9]+'
+                    r'\?expires=\d+&(?:amp;)?signature=[a-f0-9]+)',
+                    html,
+                )
+                if m:
+                    url = m.group(1).replace("&amp;", "&")
+                    print(f"  [DEBUG] Signed URL (plain): {url}")
+                    return url
+
+                # Pattern 2: JSON-escaped URL — slashes as \/ and & as \u0026
+                # Actual text in page looks like:
+                #   https:\/\/web.simple-mmo.com\/api\/npcs\/attack\/434g3s?expires=...\u0026signature=...
+                m = re.search(
+                    r'https:\\/\\/web\.simple-mmo\.com\\/api\\/npcs\\/attack\\/([A-Za-z0-9]+)'
+                    r'\?expires=(\d+)(?:\\u0026|&(?:amp;)?)signature=([a-f0-9]+)',
+                    html,
+                )
+                if m:
+                    url = f"{WEB_BASE}/api/npcs/attack/{m.group(1)}?expires={m.group(2)}&signature={m.group(3)}"
+                    print(f"  [DEBUG] Signed URL (JSON-escaped → unescaped): {url}")
+                    return url
+
+                # Pattern 3: assemble from separate token + expires + signature values
+                tok_m = re.search(r'/api/npcs/attack/([A-Za-z0-9]{4,12})[\'"\s?]', html)
+                exp_m = re.search(r'expires["\']?\s*[=:]\s*["\']?(\d{10,})', html)
+                sig_m = re.search(r'signature["\']?\s*[=:]\s*["\']?([a-f0-9]{40,})', html)
+                if tok_m and exp_m and sig_m:
+                    url = (
+                        f"{WEB_BASE}/api/npcs/attack/{tok_m.group(1)}"
+                        f"?expires={exp_m.group(1)}&signature={sig_m.group(1)}"
+                    )
+                    print(f"  [DEBUG] Signed URL (assembled): {url}")
+                    return url
+
+                # Nothing matched — dump context clues
+                print(f"  ⚠️  No signed URL found in /npcs/attack/{npc_id} (page len={len(html)})")
+                for kw in ["npcs/attack", "expires", "signature", "action="]:
+                    idx = html.lower().find(kw)
+                    if idx >= 0:
+                        print(f"  [DEBUG] '{kw}': ...{html[max(0,idx-50):idx+100]}...")
+            else:
+                print(f"  ⚠️  /npcs/attack/{npc_id} returned HTTP {r.status_code}")
+        except Exception as e:
+            print(f"  ⚠️  Could not load /npcs/attack/{npc_id}: {e}")
+
+        # Last resort — will 404 but lets us see the server error message
+        url = f"{WEB_BASE}/api/npcs/attack/{npc_id}"
+        print(f"  [DEBUG] Fallback (no signature): {url}")
+        return url
+
+    # ── legacy signed-URL helper kept for reference ────────────────────────
+
+    def _get_signed_attack_url(self, npc_id: int) -> str | None:
+        """
+        GET the NPC attack page and extract the signed API URL
+        (used for regular NPC battles, NOT Battle Arena).
+        """
+        page_url = f"{WEB_BASE}/npcs/attack/{npc_id}"
+        try:
+            r = self.bot.session.get(page_url, headers={"Accept": "text/html"}, timeout=10)
+            if r.status_code != 200:
+                print(f"  \u26a0\ufe0f  NPC page returned HTTP {r.status_code}")
+                return None
+            html = r.text
+
+            # Pattern 1: action="/api/npcs/attack/ID?expires=...&signature=..."
+            m = re.search(
+                r'[\'"](/api/npcs/attack/' + str(npc_id) + r'\?[^\'"]+)[\'"]',
+                html,
+            )
+            if m:
+                return WEB_BASE + m.group(1)
+
+            # Pattern 2: href="/npcs/attack/ID" with separate expires/signature vars
+            expires_m    = re.search(r'["\']?expires["\']?\s*[=:]\s*["\']?(\d+)', html)
+            signature_m  = re.search(r'["\']?signature["\']?\s*[=:]\s*["\']?([a-f0-9]{40,})', html)
+            if expires_m and signature_m:
+                return (
+                    f"{WEB_BASE}/api/npcs/attack/{npc_id}"
+                    f"?expires={expires_m.group(1)}&signature={signature_m.group(1)}"
+                )
+
+            # Pattern 3 (last resort): URL appears anywhere in the page
+            m2 = re.search(
+                r'(https?://web\.simple-mmo\.com/api/npcs/attack/\d+\?[^"\' ]+)',
+                html,
+            )
+            if m2:
+                return m2.group(1)
+
+        except Exception as e:
+            print(f"  \u26a0\ufe0f  Could not load NPC page: {e}")
+        return None
+
     # ── attack loop ───────────────────────────────────────────────────────────
 
     def attack_loop(self, npc_id: int, npc_name: str) -> dict:
         """
-        Repeatedly POST /api/npcs/attack/{npc_id} until victory or cap.
+        Repeatedly POST to the signed attack URL until victory or cap.
         Returns dict with success, exp, gold, attacks.
         """
-        attack_url = f"{API_BASE}/api/npcs/attack/{npc_id}"
-        referer    = f"{WEB_BASE}/npcs/attack/{npc_id}"
-        max_att    = self.ba_config["max_attacks_per_npc"]
-        delay      = self.ba_config["attack_delay"]
-
-        total_exp   = 0
-        total_gold  = 0
-        attack_count = 0
-
+        # Step 1: determine the correct Battle Arena attack URL
         print(f"\n  ⚔️  Fighting {npc_name} (ID: {npc_id})")
+        print(f"  🔗 Resolving attack endpoint...")
+
+        attack_url = self._get_ba_attack_url(npc_id)
+        referer = f"{WEB_BASE}/battle/arena"
+        max_att = self.ba_config["max_attacks_per_npc"]
+        delay   = self.ba_config["attack_delay"]
+
+        total_exp    = 0
+        total_gold   = 0
+        attack_count = 0
 
         while attack_count < max_att:
             attack_count += 1
@@ -307,10 +463,10 @@ class BattleArenaBot:
                 r = self.bot.session.post(
                     attack_url,
                     headers=self._headers(referer),
-                    data={
-                        "_token":       self.bot.csrf_token or "",
-                        "npc_id":       str(npc_id),
-                        "special_attack": "false",
+                    json={
+                        "npc_id":        npc_id,
+                        "special_attack": False,
+                        "api_token":     self.bot.api_token or "",
                     },
                     timeout=15,
                 )
@@ -320,7 +476,7 @@ class BattleArenaBot:
                 continue
 
             if r.status_code != 200:
-                print(f"\n  ❌ Attack HTTP {r.status_code}")
+                print(f"\n  ❌ Attack HTTP {r.status_code} — {r.text[:300]}")
                 time.sleep(delay * 2)
                 continue
 
@@ -385,6 +541,14 @@ class BattleArenaBot:
 
                 return {"success": True, "exp": total_exp, "gold": total_gold, "attacks": attack_count}
 
+            # ── Defeat ───────────────────────────────────────────────────────
+            if (isinstance(player_hp, (int, float)) and player_hp <= 0) or \
+               d.get("player_hp_percentage", 100) == 0:
+                print()
+                print(f"  💀 Defeated after {attack_count} attacks!")
+                self.stats["losses"] += 1
+                return {"success": False, "error": "defeated", "attacks": attack_count}
+
             # ── Error ────────────────────────────────────────────────────────
             elif t == "error":
                 print()
@@ -406,7 +570,7 @@ class BattleArenaBot:
         print("=" * 60)
         print("⚔️  SimpleMMO BATTLE ARENA BOT")
         print("=" * 60)
-        print(f"  Min BP required    : {self.ba_config['min_bp']}")
+        print(f"  Min energy required: {self.ba_config['min_bp']}")
         print(f"  Generation cost    : {self._fmt_number(self.ba_config.get('generation_cost', 13750))} gold (fetched live each fight)")
         gold_buffer = self.ba_config.get('gold_buffer', 0)
         if gold_buffer:
@@ -453,13 +617,28 @@ class BattleArenaBot:
                     print("  ❌ Failed to generate NPC. Waiting 30s...")
                     time.sleep(30)
                     continue
-
+                # Detect energy-exhaustion error from generate
+                if isinstance(npc, dict) and npc.get("type") == "error":
+                    err_msg = npc.get("result") or npc.get("title") or ""
+                    if "energy" in err_msg.lower() or "bp" in err_msg.lower():
+                        wait_min = self.ba_config.get("wait_minutes_low_resources", 30)
+                        print(f"  ⚡ Out of energy — waiting {wait_min} min to refill...")
+                        for remaining in range(wait_min * 60, 0, -15):
+                            m2, s2 = divmod(remaining, 60)
+                            print(f"\r  ⏳ Energy refill in {m2:02d}:{s2:02d}  ", end="", flush=True)
+                            time.sleep(min(15, remaining))
+                        print("\r" + " " * 40 + "\r", end="", flush=True)
+                        continue
+                    else:
+                        print(f"  ❌ Generate error: {err_msg}")
+                        time.sleep(30)
+                        continue
                 npc_id    = npc.get("id") or npc.get("npc_id")
                 npc_name  = npc.get("name",    "Unknown")
                 npc_level = npc.get("level",   "?")
-                npc_str   = npc.get("strength","?")
-                npc_def   = npc.get("defence", npc.get("defense","?"))
-                npc_hp    = npc.get("health",  npc.get("hp","?"))
+                npc_str   = npc.get("str", npc.get("strength", "?"))
+                npc_def   = npc.get("def", npc.get("defence", npc.get("defense", "?")))
+                npc_hp    = npc.get("hp",  npc.get("health", "?"))
 
                 if not npc_id:
                     print(f"  ❌ No NPC ID in generate response: {npc}")

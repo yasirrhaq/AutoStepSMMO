@@ -1,0 +1,12 @@
+{
+  "question": "Treasure Chest",
+  "button_clicked": 4,
+  "success": false,
+  "correct_answer": 3,
+  "timestamp": "20260224_040612_326132",
+  "datetime": "2026-02-24T04:06:12.326351",
+  "auto_labeled": true,
+  "auto_label_conf": 50.79,
+  "auto_label_tool": "base-clip-realtime",
+  "labeled_at": "2026-02-24T04:06:12.466907"
+}

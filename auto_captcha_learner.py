@@ -195,15 +195,36 @@ class AutoCaptchaLearner:
                     truncation=True,
                 )
                 outputs = clip_model(**inputs)
-                probs   = outputs.logits_per_image.softmax(dim=1)
 
+                # logits_per_image shape: [num_images, num_texts]
+                # We want: for each text prompt, which image wins? Then average.
+                # softmax(dim=0) → across images for each text = correct ranking direction
+                probs_per_text = outputs.logits_per_image.softmax(dim=0)  # [num_images, num_texts]
+                # Average win-probability across all text variations for each image
+                avg_probs = probs_per_text.mean(dim=1)  # [num_images]
+
+            n_images = len(button_images)
             scores = [
-                (idx + 1, float(probs[idx].max()) * 100)
-                for idx in range(len(button_images))
+                (idx + 1, float(avg_probs[idx]) * 100)
+                for idx in range(n_images)
             ]
             scores.sort(key=lambda x: x[1], reverse=True)
             best_button, best_conf = scores[0]
             margin = best_conf - scores[1][1] if len(scores) > 1 else best_conf
+
+            # Minimum confidence threshold — don't label if CLIP is barely above
+            # random (random baseline = 100/n_images %).
+            random_baseline = 100.0 / n_images
+            min_conf  = random_baseline + 10.0   # must beat random by at least 10 pp
+            min_margin = 5.0                      # must win by at least 5 pp over 2nd
+
+            if best_conf < min_conf or margin < min_margin:
+                print(
+                    f"  🤖 CLIP skipped labeling '{question}': "
+                    f"conf {best_conf:.1f}% (need >{min_conf:.0f}%), "
+                    f"margin {margin:.1f}% (need >{min_margin:.0f}%) — too uncertain"
+                )
+                return
 
             # Update metadata.json with prediction
             metadata_path = attempt_path / "metadata.json"

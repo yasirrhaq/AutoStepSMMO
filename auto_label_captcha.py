@@ -95,12 +95,13 @@ def score_buttons(question: str, button_images: list) -> list:
         )
         outputs = model(**inputs)
         logits = outputs.logits_per_image          # shape: [num_images, num_texts]
-        probs = logits.softmax(dim=1)              # per-image soft-max over text variants
+        # softmax(dim=0): for each text, which image wins? → correct ranking direction
+        probs = logits.softmax(dim=0)              # [num_images, num_texts]
+        avg_probs = probs.mean(dim=1)              # [num_images] — average win-rate
 
     scores = []
-    for img_idx, img in enumerate(button_images):
-        max_score = float(probs[img_idx].max()) * 100
-        scores.append((img_idx + 1, max_score))   # 1-based button index
+    for img_idx in range(len(button_images)):
+        scores.append((img_idx + 1, float(avg_probs[img_idx]) * 100))   # 1-based button index
 
     scores.sort(key=lambda x: x[1], reverse=True)
     return scores
@@ -168,9 +169,18 @@ for failure_dir in failure_dirs:
     second_conf              = scores[1][1] if len(scores) > 1 else 0
     margin                   = best_conf - second_conf
 
+    # Confidence guard: random baseline for 4 images = 25%.
+    # Only label if we beat random by ≥10 pp AND win margin ≥5 pp.
+    n_images       = len(button_pil_images)
+    random_base    = 100.0 / n_images
+    min_conf       = random_base + 10.0
+    min_margin     = 5.0
+    conf_ok        = best_conf >= min_conf and margin >= min_margin
+
     label_str = (
         f"  Q: '{question}'  →  pred btn {best_button} "
         f"(conf {best_conf:.1f}%, margin {margin:.1f}%)"
+        + ("" if conf_ok else "  ⚠️ UNCERTAIN — skipped")
     )
 
     if args.review:
@@ -184,6 +194,10 @@ for failure_dir in failure_dirs:
 
     print(f"{failure_dir.name}")
     print(label_str)
+
+    if not conf_ok:
+        print(f"  → Skipped (CLIP not confident enough)\n")
+        continue
 
     if not args.dry_run:
         metadata["correct_answer"]  = best_button

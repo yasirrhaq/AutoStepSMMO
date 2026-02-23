@@ -1,0 +1,12 @@
+{
+  "question": "Book",
+  "button_clicked": 2,
+  "success": false,
+  "correct_answer": 4,
+  "timestamp": "20260224_052016_373350",
+  "datetime": "2026-02-24T05:20:16.373544",
+  "auto_labeled": true,
+  "auto_label_conf": 37.03,
+  "auto_label_tool": "base-clip-realtime",
+  "labeled_at": "2026-02-24T05:20:16.494604"
+}

@@ -2,7 +2,9 @@
   "question": "Fire",
   "button_clicked": 1,
   "success": false,
-  "correct_answer": null,
+  "correct_answer": 3,
   "timestamp": "20260223_220513_492801",
-  "datetime": "2026-02-23T22:05:13.493042"
+  "datetime": "2026-02-23T22:05:13.493042",
+  "auto_labeled": true,
+  "labeled_at": "2026-02-24T04:07:10.903711"
 }

@@ -1,0 +1,12 @@
+{
+  "question": "Mushroom",
+  "button_clicked": 3,
+  "success": false,
+  "correct_answer": 4,
+  "timestamp": "20260224_051027_133246",
+  "datetime": "2026-02-24T05:10:27.134040",
+  "auto_labeled": true,
+  "auto_label_conf": 44.36,
+  "auto_label_tool": "base-clip-realtime",
+  "labeled_at": "2026-02-24T05:10:27.277899"
+}

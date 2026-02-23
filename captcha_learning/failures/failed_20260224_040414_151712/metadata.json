@@ -1,0 +1,12 @@
+{
+  "question": "Necklace",
+  "button_clicked": 4,
+  "success": false,
+  "correct_answer": 1,
+  "timestamp": "20260224_040414_151712",
+  "datetime": "2026-02-24T04:04:14.151901",
+  "auto_labeled": true,
+  "auto_label_conf": 32.8,
+  "auto_label_tool": "base-clip-realtime",
+  "labeled_at": "2026-02-24T04:04:14.292901"
+}

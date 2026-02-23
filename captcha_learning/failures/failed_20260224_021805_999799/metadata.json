@@ -1,0 +1,12 @@
+{
+  "question": "Pineapple",
+  "button_clicked": 4,
+  "success": false,
+  "correct_answer": 3,
+  "timestamp": "20260224_021805_999799",
+  "datetime": "2026-02-24T02:18:06.000014",
+  "auto_labeled": true,
+  "auto_label_conf": 29.48,
+  "auto_label_tool": "base-clip-realtime",
+  "labeled_at": "2026-02-24T02:18:06.139649"
+}

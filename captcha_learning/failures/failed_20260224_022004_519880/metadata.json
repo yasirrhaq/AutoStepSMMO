@@ -1,0 +1,12 @@
+{
+  "question": "Diamond",
+  "button_clicked": 2,
+  "success": false,
+  "correct_answer": 1,
+  "timestamp": "20260224_022004_519880",
+  "datetime": "2026-02-24T02:20:04.520122",
+  "auto_labeled": true,
+  "auto_label_conf": 45.35,
+  "auto_label_tool": "base-clip-realtime",
+  "labeled_at": "2026-02-24T02:20:04.660058"
+}
