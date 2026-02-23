@@ -14,10 +14,10 @@
   "xsrf_token": "",
   "api_token": "",
 
-
-  "auto_travel": true,
+"auto_travel": true,
   "debug_mode": false,
   "auto_battle_npcs": true,
+  "auto_gather_materials": true,
 
   "travel_delay_min": 15,
   "travel_delay_max": 18,
@@ -31,7 +31,26 @@
   "_npc_settings": "Automatically battle NPCs encountered during travel",
   "auto_battle_npcs": true,
 
+  "_gathering_settings": "Automatically gather materials and event items",
+  "auto_gather_materials": true,
+
+  "use_finetuned_captcha": false,
+
   "_warnings": "Only use auto_solve_captcha on test accounts!",
+
+  "_battle_arena_settings": "Settings for the Battle Arena bot (battle_arena_bot.py)",
+  "battle_arena": {
+    "min_bp": 2,
+    "generation_cost": 13750,
+    "gold_buffer": 0,
+    "wait_when_broke": true,
+    "wait_minutes_low_resources": 15,
+    "wait_minutes_low_energy": 2,
+    "max_attacks_per_npc": 100,
+    "attack_delay": 1.0,
+    "between_fight_delay": 5,
+    "max_wins": 0
+  },
 
   "_notes": {
     "base_url": "The base URL of your SimpleMMO instance",
