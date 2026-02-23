@@ -27,6 +27,15 @@ class QuestRunner(SimpleMMOBot):
         self.quest_points = None
         self.max_quest_points = None
         self.quest_points_next_regen_at = None  # Unix timestamp
+
+        # Quest-specific config (all values fall back to sensible defaults)
+        _qc = self.config.get("quest", {})
+        self.quest_delay_steps_min   = _qc.get("delay_between_steps_min",  2)
+        self.quest_delay_steps_max   = _qc.get("delay_between_steps_max",  4)
+        self.quest_delay_quests_min  = _qc.get("delay_between_quests_min", 3)
+        self.quest_delay_quests_max  = _qc.get("delay_between_quests_max", 6)
+        self.quest_qp_poll_interval  = int(_qc.get("qp_poll_interval",    60))
+        self.quest_error_retry_delay = _qc.get("error_retry_delay",       10)
         
         # Setup quest-specific logging
         logging.basicConfig(
@@ -80,7 +89,7 @@ class QuestRunner(SimpleMMOBot):
         Wait until at least 1 quest point is available, polling the quest page every POLL_SECS.
         SimpleMMO does not expose a regen timestamp in the page, so we just poll.
         """
-        POLL_SECS = 60  # default poll every 1 minute if regen time unknown
+        POLL_SECS = self.quest_qp_poll_interval
 
         self.logger.info("=" * 60)
         self.logger.info("Quest Points Exhausted — Waiting for Regeneration")
@@ -475,8 +484,8 @@ class QuestRunner(SimpleMMOBot):
                     
                     # Wait between attempts
                     delay = self._get_delay(
-                        self.config.get('quest_delay_min', 2),
-                        self.config.get('quest_delay_max', 4)
+                        self.quest_delay_steps_min,
+                        self.quest_delay_steps_max
                     )
                     
                     if quest_remaining > 0:
@@ -501,8 +510,8 @@ class QuestRunner(SimpleMMOBot):
                         self.logger.warning(f"Rate limited / cooldown - waiting {wait} seconds...")
                         time.sleep(wait)
                     else:
-                        self.logger.warning("Waiting 10 seconds before retry...")
-                        time.sleep(10)
+                        self.logger.warning(f"Waiting {self.quest_error_retry_delay}s before retry...")
+                        time.sleep(self.quest_error_retry_delay)
             
             # Quest completed — only if inner loop finished normally (not broken by QP wait)
             if quest_remaining == 0:
@@ -515,8 +524,8 @@ class QuestRunner(SimpleMMOBot):
                 
                 # Wait before moving to next quest
                 delay = self._get_delay(
-                    self.config.get('quest_delay_min', 3),
-                    self.config.get('quest_delay_max', 6)
+                    self.quest_delay_quests_min,
+                    self.quest_delay_quests_max
                 )
                 self.logger.info(f"\nWaiting {delay:.1f}s before next quest...")
                 time.sleep(delay)
