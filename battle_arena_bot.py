@@ -340,7 +340,7 @@ class BattleArenaBot:
                 print(f"  ⏳ Waiting {wait_min} min for resources to replenish...")
 
             tick = 30 if wait_min >= 5 else 15
-            for remaining in range(wait_min * 60, 0, -tick):
+            for remaining in range(int(wait_min * 60), 0, -tick):
                 m, s = divmod(remaining, 60)
                 label = "⏳ Energy refill in" if energy_only else "Waiting:"
                 print(f"\r  {label} {m:02d}:{s:02d}  ", end="", flush=True)
@@ -678,7 +678,7 @@ class BattleArenaBot:
                     if "energy" in err_msg.lower() or "bp" in err_msg.lower():
                         wait_min = self.ba_config.get("wait_minutes_low_energy", 2)
                         print(f"  ⚡ Out of energy — retrying in {wait_min} min...")
-                        for remaining in range(wait_min * 60, 0, -15):
+                        for remaining in range(int(wait_min * 60), 0, -15):
                             m2, s2 = divmod(remaining, 60)
                             print(f"\r  ⏳ Energy refill in {m2:02d}:{s2:02d}  ", end="", flush=True)
                             time.sleep(min(15, remaining))
