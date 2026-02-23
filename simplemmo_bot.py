@@ -1611,129 +1611,199 @@ class SimpleMMOBot:
             return False
     
     def attack_npc(self, npc_id: int) -> Dict[str, Any]:
-        """Attack an NPC during travel - keeps attacking until battle is complete"""
+        """Attack an NPC during travel using the proven signed-URL approach (same as BA bot).
+
+        Steps:
+          1. GET /npcs/attack/{npc_id} and extract the signed API URL from the page HTML.
+          2. POST to the signed URL with JSON body until victory, defeat, or safety cap.
+
+        Returns {"success": True/False, "data": {"exp", "gold", "damage", "attacks", "message", "victory"}}
+        """
         if not self.logged_in:
             self.logger.error("Not logged in")
             return {"success": False, "error": "Not logged in"}
-        
+
+        import re as _re
+
         try:
             self.logger.info(f"Attacking NPC ID: {npc_id}...")
-            
-            # The attack endpoint based on the URL pattern
-            attack_url = f"{self.base_url}/npcs/attack/{npc_id}?new_page=true"
-            
-            headers = {
-                'Referer': f'{self.base_url}/travel',
-                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-            }
-            
-            # First, GET the NPC battle page
-            response = self.session.get(attack_url, headers=headers)
-            
-            if response.status_code != 200:
-                self.logger.error(f"Failed to load NPC page: HTTP {response.status_code}")
-                return {"success": False, "error": f"HTTP {response.status_code}"}
-            
-            self.logger.info("NPC battle page loaded")
-            
-            # Now perform the actual attack loop
-            # The API endpoint for attacking
-            api_attack_url = f"https://api.simple-mmo.com/api/npcs/attack/{npc_id}"
-            
+
+            # ── Step 1: GET NPC page and extract signed attack URL ────────────
+            page_resp = self.session.get(
+                f"{self.base_url}/npcs/attack/{npc_id}",
+                headers={"Accept": "text/html"},
+                timeout=10,
+            )
+            if page_resp.status_code != 200:
+                self.logger.error(f"Failed to load NPC page: HTTP {page_resp.status_code}")
+                return {"success": False, "error": f"HTTP {page_resp.status_code}"}
+
+            html = page_resp.text
+
+            # Pattern 1: plain unescaped absolute URL
+            _m = _re.search(
+                r'(https://web\.simple-mmo\.com/api/npcs/attack/[A-Za-z0-9]+'
+                r'\?expires=\d+&(?:amp;)?signature=[a-f0-9]+)',
+                html,
+            )
+            if _m:
+                attack_url = _m.group(1).replace("&amp;", "&")
+                self.logger.debug(f"Signed URL (plain): {attack_url}")
+            else:
+                # Pattern 2: JSON-escaped — \/ slashes and \u0026 ampersand
+                _m = _re.search(
+                    r'https:\\/\\/web\.simple-mmo\.com\\/api\\/npcs\\/attack\\/([A-Za-z0-9]+)'
+                    r'\?expires=(\d+)(?:\\u0026|&(?:amp;)?)signature=([a-f0-9]+)',
+                    html,
+                )
+                if _m:
+                    attack_url = (
+                        f"{self.base_url}/api/npcs/attack/{_m.group(1)}"
+                        f"?expires={_m.group(2)}&signature={_m.group(3)}"
+                    )
+                    self.logger.debug(f"Signed URL (JSON-escaped): {attack_url}")
+                else:
+                    # Pattern 3: assemble from separate token + expires + signature fields
+                    _tok = _re.search(r'/api/npcs/attack/([A-Za-z0-9]{4,12})[\'"\s?]', html)
+                    _exp = _re.search(r'expires["\']?\s*[=:]\s*["\']?(\d{10,})', html)
+                    _sig = _re.search(r'signature["\']?\s*[=:]\s*["\']?([a-f0-9]{40,})', html)
+                    if _tok and _exp and _sig:
+                        attack_url = (
+                            f"{self.base_url}/api/npcs/attack/{_tok.group(1)}"
+                            f"?expires={_exp.group(1)}&signature={_sig.group(1)}"
+                        )
+                        self.logger.debug(f"Signed URL (assembled): {attack_url}")
+                    else:
+                        # Fallback — will surface 404/error so we can diagnose
+                        attack_url = f"{self.base_url}/api/npcs/attack/{npc_id}"
+                        self.logger.warning(
+                            f"No signed URL found in NPC page (len={len(html)}); using unsigned fallback"
+                        )
+
+            self.logger.info(f"Attack URL: {attack_url}")
+
+            # ── Step 2: Attack loop ───────────────────────────────────────────
             attack_headers = {
-                'X-XSRF-TOKEN': self.csrf_token,
-                'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8',
-                'Accept': 'application/json',
-                'Origin': 'https://web.simple-mmo.com',
-                'Referer': attack_url,
+                "X-XSRF-TOKEN": self.csrf_token,
+                "Content-Type": "application/json",
+                "Accept":        "application/json",
+                "Origin":        self.base_url,
+                "Referer":       f"{self.base_url}/travel",
             }
-            if self.api_token:
-                attack_headers['Authorization'] = f'Bearer {self.api_token}'
-            
-            # Battle statistics
+
             total_damage = 0
-            total_exp = 0
-            total_gold = 0
+            total_exp    = 0
+            total_gold   = 0
             attack_count = 0
-            max_attacks = 50  # Safety limit
-            
-            # Keep attacking until battle is complete
+            max_attacks  = 100  # safety cap
+
             while attack_count < max_attacks:
                 attack_count += 1
-                
-                # Prepare attack form data
-                form_data = {
-                    '_token': self.csrf_token,
-                    'special_attack': 'false'  # Normal attack
-                }
-                
-                # Perform attack
-                attack_response = self.session.post(api_attack_url, headers=attack_headers, data=form_data)
-                
-                if attack_response.status_code != 200:
-                    self.logger.error(f"Attack failed: HTTP {attack_response.status_code}")
-                    return {"success": False, "error": f"HTTP {attack_response.status_code}"}
-                
+
                 try:
-                    result_data = attack_response.json()
-                    
-                    # Check battle status
-                    battle_type = result_data.get("type")
-                    battle_result = result_data.get("result")
-                    battle_title = result_data.get("title", "")
-                    
-                    # Track damage for this attack
-                    damage = result_data.get("damage_given_to_player1", result_data.get("damage", 0))
-                    if isinstance(damage, (int, float)):
-                        total_damage += damage
-                    
-                    self.logger.info(f"Attack #{attack_count}: Damage={damage}, Type={battle_type}")
-                    
-                    # Check if battle is complete
-                    if (battle_type in ("success", "victory", "won", "win", "defeated")
-                            or "winner" in battle_title.lower()
-                            or "defeated" in battle_title.lower()
-                            or "you won" in battle_title.lower()
-                            or result_data.get("npc_killed") is True
-                            or result_data.get("battle_over") is True):
-                        self.logger.info(f"Battle WON after {attack_count} attacks!")
-                        
-                        # Extract final rewards
-                        total_exp = result_data.get("exp", result_data.get("experience", 0))
-                        total_gold = result_data.get("gold", result_data.get("coins", 0))
-                        
-                        return {
-                            "success": True,
-                            "data": {
-                                "exp": total_exp,
-                                "gold": total_gold,
-                                "damage": total_damage,
-                                "attacks": attack_count,
-                                "message": battle_title,
-                                "victory": True
-                            }
-                        }
-                    
-                    elif battle_type == "error" or battle_result == "error":
-                        error_msg = result_data.get("message", "Battle error")
-                        self.logger.error(f"Battle error: {error_msg}")
-                        return {"success": False, "error": error_msg}
-                    
-                    # Battle still in progress, wait a bit before next attack
-                    time.sleep(0.5)  # Small delay between attacks
-                    
-                except Exception as e:
-                    self.logger.error(f"Failed to parse battle response: {e}")
-                    # Try to continue anyway
+                    r = self.session.post(
+                        attack_url,
+                        headers=attack_headers,
+                        json={
+                            "npc_id":         npc_id,
+                            "special_attack": False,
+                            "api_token":      self.api_token or "",
+                        },
+                        timeout=15,
+                    )
+                except Exception as req_e:
+                    self.logger.error(f"Attack request error: {req_e}")
+                    time.sleep(1)
+                    continue
+
+                if r.status_code != 200:
+                    self.logger.error(f"Attack HTTP {r.status_code}: {r.text[:300]}")
+                    time.sleep(1)
+                    continue
+
+                try:
+                    d = r.json()
+                except Exception:
                     time.sleep(0.5)
-            
-            # If we reach max attacks, something is wrong
+                    continue
+
+                t         = (d.get("type") or "").lower()
+                player_hp = d.get("player_hp", "?")
+                opp_hp    = d.get("opponent_hp", "?")
+                dmg       = d.get("damage_given_to_opponent", d.get("damage", 0)) or 0
+                if isinstance(dmg, (int, float)):
+                    total_damage += dmg
+
+                self.logger.info(
+                    f"Attack #{attack_count}: dealt={dmg}  "
+                    f"enemy_hp={opp_hp}  your_hp={player_hp}  type={t}"
+                )
+
+                # ── Victory ──────────────────────────────────────────────────
+                if (t == "success"
+                        or "winner" in (d.get("title") or "").lower()
+                        or d.get("npc_killed") is True
+                        or d.get("battle_over") is True
+                        or (isinstance(opp_hp, (int, float)) and opp_hp <= 0)):
+
+                    self.logger.info(f"Battle WON after {attack_count} attacks!")
+
+                    # Parse rewards — try structured rewards list first
+                    rewards = d.get("rewards") or []
+                    for rw in rewards:
+                        if isinstance(rw, dict):
+                            total_exp  += rw.get("exp",  rw.get("experience", 0)) or 0
+                            total_gold += rw.get("gold", rw.get("coins",      0)) or 0
+
+                    if total_exp == 0:
+                        total_exp  = d.get("exp",  d.get("experience", 0)) or 0
+                        total_gold = d.get("gold", d.get("coins",      0)) or 0
+
+                    if total_exp == 0:
+                        # Last resort: parse "20,893 Total EXP" from result HTML
+                        result_html = d.get("result") or ""
+                        _em = _re.search(r"([\d,]+)\s*Total\s*EXP", result_html)
+                        if _em:
+                            total_exp = int(_em.group(1).replace(",", ""))
+
+                    return {
+                        "success": True,
+                        "data": {
+                            "exp":     total_exp,
+                            "gold":    total_gold,
+                            "damage":  int(total_damage),
+                            "attacks": attack_count,
+                            "message": d.get("title", ""),
+                            "victory": True,
+                        },
+                    }
+
+                # ── Defeat ───────────────────────────────────────────────────
+                if ((isinstance(player_hp, (int, float)) and player_hp <= 0)
+                        or d.get("player_hp_percentage", 100) == 0):
+                    self.logger.warning(f"Defeated after {attack_count} attacks")
+                    return {
+                        "success": False,
+                        "error":   "defeated",
+                        "data": {
+                            "exp": 0, "gold": 0,
+                            "damage": int(total_damage), "attacks": attack_count,
+                            "message": "Defeated", "victory": False,
+                        },
+                    }
+
+                # ── Error ────────────────────────────────────────────────────
+                if t == "error":
+                    err = d.get("message", "Unknown battle error")
+                    self.logger.error(f"Battle error: {err}")
+                    return {"success": False, "error": err}
+
+                time.sleep(0.3)
+
+            # Safety cap reached
             self.logger.warning(f"Battle did not complete after {max_attacks} attacks")
-            return {
-                "success": False,
-                "error": f"Battle timeout after {max_attacks} attacks"
-            }
-                
+            return {"success": False, "error": f"Battle timeout after {max_attacks} attacks"}
+
         except Exception as e:
             self.logger.error(f"NPC attack error: {e}")
             import traceback

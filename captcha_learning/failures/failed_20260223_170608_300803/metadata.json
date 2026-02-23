@@ -3,5 +3,8 @@
   "button_clicked": 4,
   "success": false,
   "timestamp": "20260223_170608_300803",
-  "datetime": "2026-02-23T17:06:08.301135"
+  "datetime": "2026-02-23T17:06:08.301135",
+  "correct_answer": 1,
+  "auto_labeled": true,
+  "labeled_at": "2026-02-24T05:51:26.235879"
 }

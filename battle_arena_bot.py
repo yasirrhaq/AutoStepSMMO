@@ -41,7 +41,8 @@ DEFAULT_BA_CONFIG = {
     # If True: wait when out of resources instead of stopping
     "wait_when_broke": True,
     # How many minutes to wait when resources are low
-    "wait_minutes_low_resources": 30,
+    "wait_minutes_low_resources": 15,   # wait when gold is too low
+    "wait_minutes_low_energy": 2,          # wait when energy/BP is too low
     # Maximum attacks per NPC before giving up (safety cap)
     "max_attacks_per_npc": 100,
     # Delay between attacks in seconds
@@ -119,17 +120,48 @@ class BattleArenaBot:
         """
         Fetch current BP, gold and live generation cost.
         Returns dict with 'bp', 'gold', 'generation_cost' (all may be None).
+
+        Strategy: API endpoints are tried FIRST (authoritative JSON),
+        then HTML scraping as fallback (HTML may contain stale widget values).
         """
         result = {"bp": None, "gold": None, "generation_cost": None}
 
+        # ── 1. JSON API endpoints — most reliable source for gold/BP ─────────
+        for api_url in [
+            f"{API_BASE}/api/user?api_token={self.bot.api_token}",
+            f"{WEB_BASE}/api/user",
+            f"{API_BASE}/api/user",
+        ]:
+            try:
+                r_api = self.bot.session.get(api_url, headers=self._headers(), timeout=10)
+                if r_api.status_code == 200:
+                    data = r_api.json()
+                    inner = data.get("data") or data
+                    gold_val = inner.get("gold") or data.get("gold")
+                    bp_val = (
+                        inner.get("energy")
+                        or inner.get("battle_points")
+                        or inner.get("bp")
+                        or data.get("energy")
+                        or data.get("battle_points")
+                    )
+                    if gold_val is not None:
+                        result["gold"] = int(gold_val)
+                    if bp_val is not None:
+                        result["bp"] = int(bp_val)
+                    if result["gold"] is not None and result["bp"] is not None:
+                        break
+            except Exception:
+                pass
+
         def _scrape_html(html: str):
-            """Try every known pattern to pull gold, BP/energy, generation_cost out of a page."""
-            # BP: SimpleMMO uses 'energy' for battle arena energy, also 'battle_points'
+            """Fallback: scrape gold/BP/generation_cost from page HTML."""
+            # ── Energy/BP ─────────────────────────────────────────────────────
             if result["bp"] is None:
                 for pat in [
-                    r'"energy"\s*:\s*(\d+)',          # Alpine x-data: energy
-                    r'>\s*(\d+)\s*</span>\s*</span>\s*</button>',  # energy shown in button
+                    r'"energy"\s*:\s*(\d+)',
                     r'"(?:battle_points|bp|battlePoints)"\s*:\s*(\d+)',
+                    r'>\s*(\d+)\s*</span>\s*</span>\s*</button>',
                     r'number_format\(energy\)[^\d]{0,50}>(\d+)<',
                     r'battle.?points[^\d]+(\d+)',
                 ]:
@@ -138,21 +170,24 @@ class BattleArenaBot:
                         result["bp"] = int(m.group(m.lastindex))
                         break
 
+            # ── Gold — only use values large enough to be real player gold ────
+            # (avoids matching small widget/NPC values like level numbers)
             if result["gold"] is None:
                 for pat in [
-                    r'"gold"\s*:\s*(\d+)',
-                    r"'gold'\s*:\s*(\d+)",
-                    r'"gold":\s*"([\d,]+)"',
-                    r'x-text=["\'][^"\'>]*gold[^"\'>]*["\'][^>]*>([\d,]+)<',
-                    r'Gold[^\d]{0,30}([\d,]{4,})',   # "Gold  12,345" labels
+                    r'"gold"\s*:\s*(\d{5,})',          # JSON: at least 5-digit number
+                    r"'gold'\s*:\s*(\d{5,})",
+                    r'"gold":\s*"([\d,]{5,})"',
+                    r'x-text=["\'][^"\'>]*gold[^"\'>]*["\'][^>]*>([\d,]{5,})<',
+                    r'Gold[^\d]{0,30}([\d,]{6,})',      # "Gold  2,655,823" — 6+ chars
                 ]:
                     m = re.search(pat, html, re.IGNORECASE)
                     if m:
                         val = m.group(m.lastindex).replace(",", "")
-                        if val.isdigit() and int(val) > 0:
+                        if val.isdigit() and int(val) >= 10000:
                             result["gold"] = int(val)
                             break
 
+            # ── Generation cost ───────────────────────────────────────────────
             if result["generation_cost"] is None:
                 for pat in [
                     r'"?generation_cost"?\s*[:\s]+["\']?([\d,]+)',
@@ -166,61 +201,30 @@ class BattleArenaBot:
                             result["generation_cost"] = int(val)
                             break
 
-        # 1. Try the battle arena page first (has generation_cost too)
+        # ── 2. BA page: always fetch for generation_cost; fills any missing stats
         try:
-            r = self.bot.session.get(
+            r_ba = self.bot.session.get(
                 f"{WEB_BASE}/battle/arena",
                 headers={"Accept": "text/html"},
                 timeout=10,
             )
-            if r.status_code == 200:
-                _scrape_html(r.text)
+            if r_ba.status_code == 200:
+                _scrape_html(r_ba.text)
         except Exception as e:
             print(f"  \u26a0\ufe0f  Could not fetch BA page: {e}")
 
-        # 2. Fallback: travel page (always has current player stats embedded)
+        # ── 3. Travel page as last resort ─────────────────────────────────────
         if result["gold"] is None or result["bp"] is None:
             try:
-                r2 = self.bot.session.get(
+                r_tr = self.bot.session.get(
                     f"{WEB_BASE}/travel",
                     headers={"Accept": "text/html"},
                     timeout=10,
                 )
-                if r2.status_code == 200:
-                    _scrape_html(r2.text)
+                if r_tr.status_code == 200:
+                    _scrape_html(r_tr.text)
             except Exception:
                 pass
-
-        # 3. Fallback: JSON user API endpoints
-        if result["gold"] is None or result["bp"] is None:
-            for api_url in [
-                f"{API_BASE}/api/user?api_token={self.bot.api_token}",
-                f"{WEB_BASE}/api/user",
-                f"{API_BASE}/api/user",
-            ]:
-                try:
-                    r3 = self.bot.session.get(api_url, headers=self._headers(), timeout=10)
-                    if r3.status_code == 200:
-                        data = r3.json()
-                        # Unwrap nested data key if present
-                        inner = data.get("data") or data
-                        if result["gold"] is None:
-                            result["gold"] = inner.get("gold") or data.get("gold")
-                        if result["bp"] is None:
-                            result["bp"] = (
-                                inner.get("energy")
-                                or inner.get("battle_points")
-                                or inner.get("bp")
-                                or data.get("energy")
-                                or data.get("battle_points")
-                            )
-                        if result["gold"] and result["bp"]:
-                            break
-                except Exception:
-                    pass
-
-        if result["gold"] is None and result["bp"] is None:
-            pass  # silent — shown as ? in UI
 
         # If cost still unknown, fall back to config value
         if result["generation_cost"] is None:
@@ -284,13 +288,26 @@ class BattleArenaBot:
         print(f"\n  ⛔ Cannot generate: {', '.join(reasons)}")
 
         if self.ba_config["wait_when_broke"]:
-            wait_min = self.ba_config["wait_minutes_low_resources"]
-            print(f"  ⏳ Waiting {wait_min} min for resources to replenish...")
-            for remaining in range(wait_min * 60, 0, -30):
+            # Separate wait times: energy refills fast, gold takes longer
+            energy_only = (not bp_ok) and gold_ok
+            gold_issue  = not gold_ok
+
+            if energy_only:
+                # Energy is the only blocker — check again in 2 min
+                wait_min = self.ba_config.get("wait_minutes_low_energy", 2)
+                print(f"  ⚡ Energy low — retrying in {wait_min} min...")
+            else:
+                # Gold (and possibly energy) is the blocker — wait longer
+                wait_min = self.ba_config.get("wait_minutes_low_resources", 15)
+                print(f"  ⏳ Waiting {wait_min} min for resources to replenish...")
+
+            tick = 30 if wait_min >= 5 else 15
+            for remaining in range(wait_min * 60, 0, -tick):
                 m, s = divmod(remaining, 60)
-                print(f"\r  Waiting: {m:02d}:{s:02d}  ", end="", flush=True)
-                time.sleep(min(30, remaining))
-            print("\r" + " " * 40 + "\r", end="", flush=True)
+                label = "⏳ Energy refill in" if energy_only else "Waiting:"
+                print(f"\r  {label} {m:02d}:{s:02d}  ", end="", flush=True)
+                time.sleep(min(tick, remaining))
+            print("\r" + " " * 50 + "\r", end="", flush=True)
             return False
         else:
             print("  🛑 wait_when_broke=false → stopping.")
@@ -621,13 +638,13 @@ class BattleArenaBot:
                 if isinstance(npc, dict) and npc.get("type") == "error":
                     err_msg = npc.get("result") or npc.get("title") or ""
                     if "energy" in err_msg.lower() or "bp" in err_msg.lower():
-                        wait_min = self.ba_config.get("wait_minutes_low_resources", 30)
-                        print(f"  ⚡ Out of energy — waiting {wait_min} min to refill...")
+                        wait_min = self.ba_config.get("wait_minutes_low_energy", 2)
+                        print(f"  ⚡ Out of energy — retrying in {wait_min} min...")
                         for remaining in range(wait_min * 60, 0, -15):
                             m2, s2 = divmod(remaining, 60)
                             print(f"\r  ⏳ Energy refill in {m2:02d}:{s2:02d}  ", end="", flush=True)
                             time.sleep(min(15, remaining))
-                        print("\r" + " " * 40 + "\r", end="", flush=True)
+                        print("\r" + " " * 50 + "\r", end="", flush=True)
                         continue
                     else:
                         print(f"  ❌ Generate error: {err_msg}")
