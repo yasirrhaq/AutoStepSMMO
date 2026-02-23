@@ -432,41 +432,56 @@ class SimpleMMOBot:
                 
                 # SimpleMMO uses a 'type' field to signal what happened this step
                 step_type = str(data.get("type", "") or data.get("rewardType", "") or "").lower()
-                
+
+                # ── KEY FIELD: 'value' carries the ID for NPC/material steps ────
+                # e.g. {"type": "npc", "value": 1234}  or  {"type": "material", "value": 5678}
+                raw_value = data.get("value")
+
+                # Log raw response when debug mode is on (or when type is unusual)
+                if self.config.get("debug_mode", False) or step_type not in (
+                    "", "gold", "exp", "experience", "none", "normal"
+                ):
+                    import json as _json
+                    self.logger.info(f"[RAW TRAVEL] type={step_type!r} value={raw_value!r} text={str(text)[:120]!r}")
+                    self.logger.debug(f"[RAW TRAVEL FULL] {_json.dumps(data)[:500]}")
+
                 # Check for CAPTCHA challenge
                 if "i-am-not-a-bot" in text.lower() or "hold up" in text.lower():
                     results["captcha"] = True
                     return results
-                
+
                 # ── NPC encounter detection ──────────────────────────────────
                 # Priority 1: explicit 'type' field from API
                 npc_from_type = step_type in ("npc", "battle", "enemy", "encounter", "pvp", "monster")
-                
-                # Priority 2: explicit npc_id field
-                npc_id = data.get("npc_id") or data.get("npcId") or data.get("encounter_npc_id")
+
+                # Priority 2: explicit npc_id field OR the generic 'value' field when type==npc
+                npc_id = (
+                    data.get("npc_id") or data.get("npcId") or data.get("encounter_npc_id")
+                    or (raw_value if npc_from_type and raw_value else None)
+                )
                 npc_name = data.get("npc_name") or data.get("npcName") or data.get("encounter_npc_name")
-                
+
                 # Priority 3: nested npc object
                 npc_data = data.get("npc") or data.get("encounter") or data.get("battle")
                 if isinstance(npc_data, dict):
                     npc_id = npc_id or npc_data.get("id") or npc_data.get("npc_id")
                     npc_name = npc_name or npc_data.get("name") or npc_data.get("npc_name")
-                
+
                 # Only flag as NPC encounter if we have concrete evidence
-                # (avoid false positives from normal travel text)
                 if npc_from_type or npc_id:
                     results["npc_encounter"] = True
                     results["npc_id"] = npc_id
                     results["npc_name"] = npc_name
-                
+
                 # ── Material/gathering encounter detection ───────────────────
                 # Priority 1: explicit 'type' field from API
                 material_from_type = step_type in (
                     "material", "gather", "gathering", "salvage",
                     "materialgather", "material_gather", "item"
                 )
-                
+
                 # Priority 2: session ID field — try every known name variant
+                # ALSO check the 'value' field when type indicates material
                 nested = data.get("data", {})
                 nested = nested if isinstance(nested, dict) else {}
                 material_session_id = (
@@ -475,8 +490,9 @@ class SimpleMMOBot:
                     or data.get("session_id")
                     or nested.get("material_session_id") or nested.get("materialSessionId")
                     or nested.get("gathering_session_id") or nested.get("session_id")
+                    or (raw_value if material_from_type and raw_value else None)
                 )
-                
+
                 # Priority 3: text keywords
                 has_material_keywords = False
                 if text:
@@ -487,8 +503,9 @@ class SimpleMMOBot:
                         "material discovered", "you found some", "material awaits"
                     ]
                     has_material_keywords = any(phrase in text_lower for phrase in material_phrases)
-                
-                if material_from_type or material_session_id or has_material_keywords:
+
+                if material_from_type or material_session_id:
+                    # Strong signal (type field or session ID) — always act
                     results["material_encounter"] = True
                     results["material_session_id"] = material_session_id
                     results["material_quantity"] = data.get("quantity", data.get("amount",
@@ -497,6 +514,13 @@ class SimpleMMOBot:
                         data.get("material_name") or data.get("materialName")
                         or data.get("name") or nested.get("name")
                     )
+                elif has_material_keywords:
+                    # Weak signal (text only) — flag but do NOT set a name derived from
+                    # generic fields (avoids the 'Material' false positive)
+                    results["material_encounter"] = True
+                    results["material_session_id"] = None  # will be resolved from page HTML
+                    results["material_quantity"] = data.get("quantity", data.get("amount", 1))
+                    results["material_name"] = data.get("material_name") or data.get("materialName")
                 
                 # Get reward info - PRIMARY reward fields
                 reward_type = data.get("rewardType", "none")
@@ -1734,12 +1758,26 @@ class SimpleMMOBot:
             travel_page = self.session.get(f"{self.base_url}/travel", allow_redirects=True)
             page_html = travel_page.text
             
-            # Check for material gathering encounter
             import re
-            # Handles both quoted ("123") and unquoted (123) JSON/JS values
-            material_session_match = re.search(r'material_session_id\D{0,10}?(\d+)', page_html)
-            if material_session_match:
-                material_session_id = int(material_session_match.group(1))
+            # ── Pre-travel: detect pending material encounter ─────────────────
+            # Try every plausible HTML pattern for session ID
+            _session_patterns = [
+                r'material_session_id\D{0,15}?(\d+)',
+                r'materialSessionId\D{0,15}?(\d+)',
+                r'gathering_session_id\D{0,15}?(\d+)',
+                r'gatheringSessionId\D{0,15}?(\d+)',
+                r'data-(?:material|gathering)-(?:session-)?id=["\']?(\d+)',
+                r'session_id["\s:=]+["\']?(\d+)',
+            ]
+            material_session_id = None
+            for _pat in _session_patterns:
+                _m = re.search(_pat, page_html, re.IGNORECASE)
+                if _m:
+                    material_session_id = int(_m.group(1))
+                    self.logger.info(f"Pre-travel: found material session ID {material_session_id} via pattern: {_pat}")
+                    break
+
+            if material_session_id:
                 self.logger.info(f"Detected material gathering opportunity (session_id: {material_session_id})")
                 
                 # Try to extract quantity and name
@@ -1767,38 +1805,42 @@ class SimpleMMOBot:
                             self.logger.info("Not enough energy for gathering, continuing with travel...")
                         material_gather_data = {"success": False, "error": error_msg, "insufficient_energy": True}
             
-            # Check if we got redirected to an NPC battle page
-            if '/npcs/attack/' in travel_page.url or '/npcs/battle/' in travel_page.url:
-                # Extract NPC ID from URL
-                import re
-                npc_match = re.search(r'/npcs/(?:attack|battle)/(\d+)', travel_page.url)
-                if npc_match:
-                    npc_id = int(npc_match.group(1))
-                    self.logger.info(f"Detected ongoing NPC battle (ID: {npc_id})")
-                    
-                    # Auto-battle if enabled
-                    if self.config.get("auto_battle_npcs", True):
-                        self.logger.info("Auto-battling NPC before continuing travel...")
-                        battle_result = self.attack_npc(npc_id)
-                        
-                        if not battle_result.get("success"):
-                            return {
-                                "success": False,
-                                "error": f"NPC battle failed: {battle_result.get('error')}",
-                                "npc_encounter": True,
-                                "npc_battle": battle_result
-                            }
-                        
-                        # Store battle data to include in travel result
-                        npc_battle_data = battle_result.get("data", {})
-                        self.logger.info("NPC defeated, continuing with travel...")
-                    else:
+            # ── Pre-travel: detect pending NPC battle ──────────────────────────
+            # Check redirect URL first, then fall back to page HTML
+            npc_id_pretrav = None
+            npc_url_check = re.search(r'/npcs/(?:attack|battle)/(\d+)', travel_page.url)
+            if not npc_url_check:
+                npc_url_check = re.search(r'/npcs/(?:attack|battle)/(\d+)', page_html)
+            if npc_url_check:
+                npc_id_pretrav = int(npc_url_check.group(1))
+
+            if npc_id_pretrav:
+                npc_id = npc_id_pretrav
+                self.logger.info(f"Pre-travel: detected pending NPC battle (ID: {npc_id})")
+
+                # Auto-battle if enabled
+                if self.config.get("auto_battle_npcs", True):
+                    self.logger.info("Auto-battling NPC before continuing travel...")
+                    battle_result = self.attack_npc(npc_id)
+
+                    if not battle_result.get("success"):
                         return {
                             "success": False,
-                            "error": "NPC encounter blocking travel (auto_battle_npcs is disabled)",
+                            "error": f"NPC battle failed: {battle_result.get('error')}",
                             "npc_encounter": True,
-                            "npc_id": npc_id
+                            "npc_battle": battle_result
                         }
+
+                    # Store battle data to include in travel result
+                    npc_battle_data = battle_result.get("data", {"victory": True})
+                    self.logger.info("NPC defeated, continuing with travel...")
+                else:
+                    return {
+                        "success": False,
+                        "error": "NPC encounter blocking travel (auto_battle_npcs is disabled)",
+                        "npc_encounter": True,
+                        "npc_id": npc_id
+                    }
         except Exception as e:
             self.logger.warning(f"Failed to check for NPC encounter: {e}")
             # Continue with travel attempt anyway
@@ -1841,54 +1883,99 @@ class SimpleMMOBot:
                     # Parse the results
                     parsed = self._parse_travel_results(result_data)
                     
-                    # CHECK: If material detected but no session ID, reload /travel page to get it
+                    import re as _re
+
+                    # ── If material detected but no session ID → re-fetch travel page ──
                     if parsed.get("material_encounter") and not parsed.get("material_session_id"):
-                        self.logger.info("Material detected in travel result but no session ID - checking travel page...")
+                        self.logger.info("Material detected but no session ID — re-fetching /travel page...")
                         try:
-                            travel_page = self.session.get(f"{self.base_url}/travel", allow_redirects=True)
-                            page_html = travel_page.text
-                            
-                            # Extract material session ID from HTML
-                            import re
-                            material_session_match = re.search(r'material_session_id\D{0,10}?(\d+)', page_html)
-                            if material_session_match:
-                                material_session_id = int(material_session_match.group(1))
-                                parsed["material_session_id"] = material_session_id
-                                self.logger.info(f"Found material_session_id: {material_session_id}")
-                                
-                                # Try to extract quantity and name too
-                                qty_match = re.search(r'Remaining Material["\s:]+(\d+)', page_html)
-                                if qty_match:
-                                    parsed["material_quantity"] = int(qty_match.group(1))
-                                
-                                name_match = re.search(r'material[_-]?name["\s:]+["\']([^"\'>]+)', page_html, re.IGNORECASE)
-                                if name_match:
-                                    parsed["material_name"] = name_match.group(1)
+                            tp = self.session.get(f"{self.base_url}/travel", allow_redirects=True)
+                            ph = tp.text
+
+                            # Log first 800 chars of page so we can debug regex mismatches
+                            self.logger.debug(f"[TRAVEL PAGE SNIPPET] {ph[:800]}")
+
+                            # Try every plausible pattern for the session ID
+                            session_patterns = [
+                                r'material_session_id\D{0,15}?(\d+)',
+                                r'materialSessionId\D{0,15}?(\d+)',
+                                r'gathering_session_id\D{0,15}?(\d+)',
+                                r'gatheringSessionId\D{0,15}?(\d+)',
+                                r'data-(?:material|gathering)-(?:session-)?id=["\'](\d+)',
+                                r'/gathering/material/gather[^"\']*["\']?\s*[^"\']*?["\']?\s*(\d+)',
+                                r'"session":\s*["\']?(\d+)',
+                                r'session_id["\s:=]+["\']?(\d+)',
+                            ]
+                            sid = None
+                            for pat in session_patterns:
+                                m = _re.search(pat, ph, _re.IGNORECASE)
+                                if m:
+                                    sid = int(m.group(1))
+                                    self.logger.info(f"Found material session ID {sid} via pattern: {pat}")
+                                    break
+
+                            if sid:
+                                parsed["material_session_id"] = sid
+                                # Quantity
+                                qty_m = _re.search(r'[Rr]emaining\D{0,20}?(\d+)', ph)
+                                if qty_m:
+                                    parsed["material_quantity"] = int(qty_m.group(1))
+                                # Name
+                                name_m = _re.search(r'material[_-]?name["\s:=]+["\']([^"\'>]+)', ph, _re.IGNORECASE)
+                                if name_m:
+                                    parsed["material_name"] = name_m.group(1)
                             else:
-                                self.logger.warning("Material encounter detected but no material_session_id found on travel page")
-                                # Clear material_encounter flag since we can't gather without session ID
+                                self.logger.warning("Could not find material session ID on /travel page — skipping gather")
                                 parsed["material_encounter"] = False
                         except Exception as e:
-                            self.logger.error(f"Error checking travel page for material: {e}")
+                            self.logger.error(f"Error re-fetching /travel for material: {e}")
                             parsed["material_encounter"] = False
-                    
-                    # Include NPC battle data if we fought an NPC
+
+                    # ── Gather material if we now have a session ID ──────────────
+                    if parsed.get("material_encounter") and parsed.get("material_session_id") and not material_gather_data:
+                        if self.config.get("auto_gather_materials", True):
+                            msid = parsed["material_session_id"]
+                            mname = parsed.get("material_name")
+                            mqty  = parsed.get("material_quantity", 1)
+                            self.logger.info(f"Gathering material '{mname}' (session={msid}, qty={mqty})")
+                            gr = self.salvage_material(msid, mqty, mname)
+                            if gr.get("success"):
+                                material_gather_data = gr
+                                self.logger.info("Material gathered from inline travel response.")
+                            else:
+                                self.logger.warning(f"Material gather failed: {gr.get('error')}")
+
+                    # Include NPC/material battle data collected so far
                     result = {"success": True, "data": result_data, "parsed": parsed}
                     if npc_battle_data:
                         result["npc_battle"] = npc_battle_data
                     if material_gather_data:
                         result["material_gather"] = material_gather_data
 
-                    # Handle inline NPC encounter returned by the travel API response itself
-                    # (different from a pre-existing redirect — this is a new encounter)
-                    if parsed.get("npc_encounter") and parsed.get("npc_id") and not npc_battle_data:
-                        npc_id = parsed["npc_id"]
-                        self.logger.info(f"Travel step triggered NPC encounter (ID: {npc_id})")
+                    # ── Handle NPC encounter from travel API response ─────────────
+                    # Case A: we have npc_id directly from the response
+                    # Case B: type=npc but no id — re-fetch travel page, look for redirect
+                    npc_id_for_battle = parsed.get("npc_id")
+                    if parsed.get("npc_encounter") and not npc_id_for_battle and not npc_battle_data:
+                        self.logger.info("NPC encounter signalled but no npc_id — re-fetching /travel to find redirect...")
+                        try:
+                            tp2 = self.session.get(f"{self.base_url}/travel", allow_redirects=True)
+                            npc_url_match = _re.search(r'/npcs/(?:attack|battle)/(\d+)', tp2.url)
+                            if not npc_url_match:
+                                npc_url_match = _re.search(r'/npcs/(?:attack|battle)/(\d+)', tp2.text)
+                            if npc_url_match:
+                                npc_id_for_battle = int(npc_url_match.group(1))
+                                self.logger.info(f"Found NPC ID {npc_id_for_battle} from travel page redirect")
+                        except Exception as e:
+                            self.logger.error(f"Error re-fetching /travel for NPC: {e}")
+
+                    if parsed.get("npc_encounter") and npc_id_for_battle and not npc_battle_data:
+                        self.logger.info(f"Travel step triggered NPC encounter (ID: {npc_id_for_battle})")
                         if self.config.get("auto_battle_npcs", True):
                             self.logger.info("Auto-battling NPC from travel result...")
-                            battle_result = self.attack_npc(npc_id)
+                            battle_result = self.attack_npc(npc_id_for_battle)
                             if battle_result.get("success"):
-                                result["npc_battle"] = battle_result.get("data", {})
+                                result["npc_battle"] = battle_result.get("data", {"victory": True})
                                 self.logger.info("NPC defeated after travel step.")
                             else:
                                 self.logger.warning(f"NPC battle after travel failed: {battle_result.get('error')}")
