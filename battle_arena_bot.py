@@ -32,8 +32,12 @@ from simplemmo_bot import SimpleMMOBot
 DEFAULT_BA_CONFIG = {
     # Minimum BP required to generate a fight (1 BP per generation)
     "min_bp": 2,
-    # Minimum gold required (generation costs ~13,750 gold)
-    "min_gold": 15000,
+    # Known generation cost in gold (fetched live from page if possible)
+    "generation_cost": 13750,
+    # Minimum gold buffer to keep after paying generation cost
+    "gold_buffer": 0,
+    # Minimum gold required = generation_cost + gold_buffer (computed at runtime)
+    "min_gold": 0,
     # If True: wait when out of resources instead of stopping
     "wait_when_broke": True,
     # How many minutes to wait when resources are low
@@ -113,12 +117,12 @@ class BattleArenaBot:
 
     def get_user_resources(self) -> dict:
         """
-        Fetch current BP and gold from the battle arena page or user API.
-        Returns dict with 'bp' and 'gold' (both may be None if unavailable).
+        Fetch current BP, gold and live generation cost.
+        Returns dict with 'bp', 'gold', 'generation_cost' (all may be None).
         """
-        result = {"bp": None, "gold": None}
+        result = {"bp": None, "gold": None, "generation_cost": None}
 
-        # Try the battle arena page — it embeds current stats in Alpine.js data
+        # Try the battle arena page — embeds stats in Alpine.js data
         try:
             r = self.bot.session.get(
                 f"{WEB_BASE}/battle-arena",
@@ -128,21 +132,36 @@ class BattleArenaBot:
             if r.status_code == 200:
                 html = r.text
 
-                # Battle points — look for "battle_points":N or "bp":N
+                # Battle points
                 bp_match = re.search(
                     r'"(?:battle_points|bp|battlepoints)"\s*:\s*(\d+)', html, re.IGNORECASE
                 )
                 if bp_match:
                     result["bp"] = int(bp_match.group(1))
 
-                # Gold — look for "gold":N in JS context
+                # Gold — shown as e.g. x-text="format_number(gold)" or "gold":12345
                 gold_match = re.search(r'"gold"\s*:\s*(\d+)', html)
                 if gold_match:
                     result["gold"] = int(gold_match.group(1))
+
+                # Live generation cost — e.g. x-text="format_number(generation_cost)"
+                # and inline like >13,750< or generation_cost: 13750
+                cost_match = re.search(
+                    r'"?generation_cost"?\s*[:\s]+["\']?([\d,]+)', html, re.IGNORECASE
+                )
+                if cost_match:
+                    result["generation_cost"] = int(cost_match.group(1).replace(",", ""))
+                else:
+                    # Fallback: grab the number next to the gold coin icon in the generate button
+                    cost_match2 = re.search(
+                        r'I_GoldCoin[^>]+>\s*([\d,]+)', html
+                    )
+                    if cost_match2:
+                        result["generation_cost"] = int(cost_match2.group(1).replace(",", ""))
         except Exception as e:
             print(f"  ⚠️  Could not fetch BA page: {e}")
 
-        # Fallback: try the user API endpoint
+        # Fallback: user API
         if result["bp"] is None or result["gold"] is None:
             try:
                 r2 = self.bot.session.get(
@@ -163,24 +182,51 @@ class BattleArenaBot:
             except Exception:
                 pass
 
+        # If cost still unknown, fall back to config value
+        if result["generation_cost"] is None:
+            result["generation_cost"] = self.ba_config.get("generation_cost", 13750)
+
         return result
 
     def check_resources(self) -> bool:
         """
-        Returns True if we have enough BP and gold to generate a fight.
-        Waits or exits if not.
+        Fetch live gold/BP, show how many fights can be afforded, and return
+        True if resources are sufficient for at least one generation.
+        Returns None to signal a hard stop.
         """
         resources = self.get_user_resources()
         bp   = resources["bp"]
         gold = resources["gold"]
+        cost = resources["generation_cost"]
 
-        min_bp   = self.ba_config["min_bp"]
-        min_gold = self.ba_config["min_gold"]
+        # Update tracked cost so the rest of the bot uses the live value
+        if cost:
+            self.ba_config["generation_cost"] = cost
 
-        print(f"  💡 Resources — BP: {bp if bp is not None else '?'} | Gold: {self._fmt_number(gold) if gold is not None else '?'}")
+        min_bp     = self.ba_config["min_bp"]
+        buffer     = self.ba_config.get("gold_buffer", 0)
+        min_needed = cost + buffer  # gold required for one generation
+
+        # How many fights can we afford right now?
+        if gold is not None and cost:
+            spendable    = max(0, gold - buffer)
+            fights_avail = spendable // cost
+        else:
+            fights_avail = None
+
+        # ── Print affordability summary ───────────────────────────────────────
+        print(f"\n  {'─'*50}")
+        print(f"  💰 Gold in hand   : {self._fmt_number(gold) if gold is not None else '?'}")
+        print(f"  🎲 Generation cost: {self._fmt_number(cost)} gold per fight")
+        if buffer:
+            print(f"  🛡️  Gold buffer    : {self._fmt_number(buffer)} (kept in reserve)")
+        if fights_avail is not None:
+            print(f"  ⚔️  Fights afford  : {fights_avail} fight{'s' if fights_avail != 1 else ''} possible")
+        print(f"  ⚡ BP available   : {bp if bp is not None else '?'} (need {min_bp})")
+        print(f"  {'─'*50}")
 
         bp_ok   = bp   is None or bp   >= min_bp
-        gold_ok = gold is None or gold >= min_gold
+        gold_ok = gold is None or gold >= min_needed
 
         if bp_ok and gold_ok:
             return True
@@ -189,22 +235,26 @@ class BattleArenaBot:
         if not bp_ok:
             reasons.append(f"BP too low ({bp} < {min_bp})")
         if not gold_ok:
-            reasons.append(f"Gold too low ({self._fmt_number(gold)} < {self._fmt_number(min_gold)})")
+            shortfall = min_needed - (gold or 0)
+            reasons.append(
+                f"Gold too low — have {self._fmt_number(gold)}, "
+                f"need {self._fmt_number(min_needed)} (short {self._fmt_number(shortfall)})"
+            )
 
         print(f"\n  ⛔ Cannot generate: {', '.join(reasons)}")
 
         if self.ba_config["wait_when_broke"]:
             wait_min = self.ba_config["wait_minutes_low_resources"]
-            print(f"  ⏳ Waiting {wait_min} minutes for resources to replenish...")
+            print(f"  ⏳ Waiting {wait_min} min for resources to replenish...")
             for remaining in range(wait_min * 60, 0, -30):
                 m, s = divmod(remaining, 60)
                 print(f"\r  Waiting: {m:02d}:{s:02d}  ", end="", flush=True)
                 time.sleep(min(30, remaining))
             print("\r" + " " * 40 + "\r", end="", flush=True)
-            return False  # Re-check on next loop iteration
+            return False
         else:
             print("  🛑 wait_when_broke=false → stopping.")
-            return None  # Signal caller to exit
+            return None
 
     # ── generate ──────────────────────────────────────────────────────────────
 
@@ -357,7 +407,10 @@ class BattleArenaBot:
         print("⚔️  SimpleMMO BATTLE ARENA BOT")
         print("=" * 60)
         print(f"  Min BP required    : {self.ba_config['min_bp']}")
-        print(f"  Min Gold required  : {self._fmt_number(self.ba_config['min_gold'])}")
+        print(f"  Generation cost    : {self._fmt_number(self.ba_config.get('generation_cost', 13750))} gold (fetched live each fight)")
+        gold_buffer = self.ba_config.get('gold_buffer', 0)
+        if gold_buffer:
+            print(f"  Gold buffer        : {self._fmt_number(gold_buffer)} (kept in reserve)")
         print(f"  Wait when broke    : {self.ba_config['wait_when_broke']}")
         print(f"  Attack delay       : {self.ba_config['attack_delay']}s")
         max_wins = self.ba_config["max_wins"]
