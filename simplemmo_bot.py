@@ -522,6 +522,50 @@ class SimpleMMOBot:
                     results["material_quantity"] = data.get("quantity", data.get("amount", 1))
                     results["material_name"] = data.get("material_name") or data.get("materialName")
                 
+                # ── Item drop (type='item') — parse name and rarity from HTML text ──
+                if step_type == "item" and text:
+                    import re as _re
+                    _rarity_map = {
+                        "common": "Common", "uncommon": "Uncommon", "rare": "Rare",
+                        "elite": "Elite", "epic": "Epic", "legendary": "Legendary",
+                        "mythic": "Mythic", "celestial": "Celestial",
+                    }
+                    _rarity = "Common"
+                    _rc = _re.search(
+                        r"class=['\"][^'\"]*\b(common|uncommon|rare|elite|epic|legendary|mythic|celestial)\b[^'\"]*['\"]",
+                        text, _re.I
+                    )
+                    if _rc:
+                        _rarity = _rarity_map.get(_rc.group(1).lower(), "Common")
+
+                    _name = None
+                    # Try: <span class='...-item' ...>Name</span>
+                    _nm = _re.search(
+                        r"<span[^>]*class=['\"][^'\"]*(?:common|uncommon|rare|elite|epic|legendary|mythic|celestial)[^'\"]*['\"][^>]*>([^<]{2,60})</span>",
+                        text, _re.I
+                    )
+                    if _nm:
+                        _name = _nm.group(1).strip()
+                    if not _name:
+                        # Try: <a href="/items/...">Name</a>
+                        _am = _re.search(
+                            r"<a[^>]*href=['\"][^'\"]*?/items?/[^'\"]*['\"][^>]*>([^<]{2,60})</a>",
+                            text, _re.I
+                        )
+                        if _am:
+                            _name = _am.group(1).strip()
+                    if not _name:
+                        # Fallback: any capitalised link text inside the HTML
+                        _tm = _re.search(r"<a[^>]+>([A-Z][a-zA-Z0-9\s'\-]{2,50})</a>", text)
+                        if _tm:
+                            _name = _tm.group(1).strip()
+                    if not _name:
+                        _name = "Unknown Item"
+
+                    # Only populate if not already filled from structured data
+                    if not results["items"]:
+                        results["items"].append({"name": _name, "rarity": _rarity, "quantity": 1})
+
                 # Get reward info - PRIMARY reward fields
                 reward_type = data.get("rewardType", "none")
                 reward_amount = data.get("rewardAmount", 0)

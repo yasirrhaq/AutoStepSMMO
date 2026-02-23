@@ -435,18 +435,24 @@ class AFK24x7Bot:
                         
                         items = parsed.get("items", [])
                         if items:
-                            print(f"  🎁 Items found:")
-                            for item in items[:5]:  # Limit to first 5 items
+                            _RARITY_ICON = {
+                                "Common": "⚪", "Uncommon": "🟢", "Rare": "🔵",
+                                "Elite": "🟣", "Epic": "🟠", "Legendary": "🟡",
+                                "Mythic": "🔴", "Celestial": "⭐",
+                            }
+                            for item in items[:5]:
                                 if isinstance(item, dict):
                                     item_name = item.get("name", item.get("item", "Unknown"))
                                     item_qty = item.get("quantity", item.get("qty", 1))
                                     rarity = item.get("rarity", "")
+                                    icon = _RARITY_ICON.get(rarity, "🎁")
+                                    qty_str = f" x{item_qty}" if item_qty and int(item_qty) > 1 else ""
                                     if rarity:
-                                        print(f"     - {item_name} x{item_qty} ({rarity})")
+                                        print(f"  {icon} [{rarity}] {item_name}{qty_str}")
                                     else:
-                                        print(f"     - {item_name} x{item_qty}")
+                                        print(f"  🎁 {item_name}{qty_str}")
                                 else:
-                                    print(f"     - {item}")
+                                    print(f"  🎁 {item}")
                             if len(items) > 5:
                                 print(f"     ... and {len(items) - 5} more items")
                             has_rewards = True
