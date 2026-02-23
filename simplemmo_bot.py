@@ -416,7 +416,11 @@ class SimpleMMOBot:
             "npc_id": None,
             "npc_name": None,
             "current_gold": 0,
-            "current_exp": 0
+            "current_exp": 0,
+            "material_encounter": False,
+            "material_session_id": None,
+            "material_quantity": 0,
+            "material_name": None
         }
         
         try:
@@ -447,6 +451,33 @@ class SimpleMMOBot:
                     results["npc_encounter"] = True
                     results["npc_id"] = npc_id
                     results["npc_name"] = npc_name
+                
+                # Check for material gathering/salvage encounter
+                material_session_id = data.get("material_session_id") or data.get("materialSessionId")
+                
+                # More specific material detection - only if we have concrete indicators
+                has_material_keywords = False
+                if text:
+                    text_lower = text.lower()
+                    # Look for specific material-related phrases, not just any occurrence
+                    material_phrases = [
+                        "material found",
+                        "salvage material",
+                        "gather material",
+                        "gathering material",
+                        "you found material",
+                        "discovered material",
+                        "material discovered"
+                    ]
+                    has_material_keywords = any(phrase in text_lower for phrase in material_phrases)
+                
+                # Only mark as material_encounter if we have session ID or strong indicators
+                if material_session_id or has_material_keywords:
+                    results["material_encounter"] = True
+                    results["material_session_id"] = material_session_id
+                    results["material_quantity"] = data.get("quantity", data.get("amount", 1))
+                    # Try to extract material name from text or data
+                    results["material_name"] = data.get("material_name") or data.get("materialName") or data.get("name")
                 
                 # Get reward info - PRIMARY reward fields
                 reward_type = data.get("rewardType", "none")
@@ -513,7 +544,7 @@ class SimpleMMOBot:
                 results["raw"] = data
                 
                 # Debug logging if we got unexpected structure
-                if results["gold"] == 0 and results["exp"] == 0 and not results["items"]:
+                if results["gold"] == 0 and results["exp"] == 0 and not results["items"] and not results["material_encounter"]:
                     self.logger.debug(f"No rewards parsed from: {data}")
                     
         except Exception as e:
@@ -522,6 +553,97 @@ class SimpleMMOBot:
             self.logger.debug(traceback.format_exc())
         
         return results
+    
+    def salvage_material(self, material_session_id: int, quantity: int = None, material_name: str = None) -> Dict[str, Any]:
+        """Salvage/gather materials encountered during travel
+        
+        Args:
+            material_session_id: The session ID for the material encounter
+            quantity: Amount to salvage (default: all available)
+            material_name: Name of the material (for logging)
+            
+        Returns:
+            Dict with success status and rewards
+        """
+        if not self.logged_in:
+            self.logger.error("Not logged in")
+            return {"success": False, "error": "Not logged in"}
+        
+        if not material_session_id:
+            item_info = f" '{material_name}'" if material_name else ""
+            self.logger.error(f"Cannot salvage material{item_info}: Invalid session ID (None)")
+            return {"success": False, "error": "Invalid material session ID"}
+        
+        try:
+            # API endpoint for gathering/salvaging materials
+            gather_url = f"{self.base_url}/api/gathering/material/gather"
+            
+            # If quantity not specified, get info first to determine max quantity
+            if quantity is None:
+                info_url = f"{self.base_url}/api/gathering/material/information"
+                # This endpoint might need material_session_id as query param
+                info_response = self.session.get(info_url, params={"id": material_session_id})
+                if info_response.status_code == 200:
+                    info_data = info_response.json()
+                    quantity = info_data.get("quantity", info_data.get("amount", 1))
+                else:
+                    quantity = 1  # Fallback
+            
+            item_info = f" '{material_name}'" if material_name else ""
+            self.logger.info(f"Salvaging material{item_info} (session_id: {material_session_id}, quantity: {quantity})")
+            
+            # POST request to salvage
+            payload = {
+                "id": material_session_id,
+                "quantity": quantity
+            }
+            
+            response = self.session.post(gather_url, json=payload)
+            
+            if response.status_code == 200:
+                data = response.json()
+                
+                # Check if gathering actually succeeded
+                status = data.get("status", "").lower()
+                if status == "success" or data.get("type") == "success":
+                    # Parse rewards from salvage
+                    result = {
+                        "success": True,
+                        "exp": data.get("exp_amount", data.get("exp", 0)),
+                        "gold": data.get("gold_amount", data.get("gold", 0)),
+                        "items": data.get("items", []),
+                        "message": data.get("message", "Material salvaged"),
+                        "energy_used": data.get("energy_points", {}).get("current", 0)
+                    }
+                    
+                    self.logger.info(f"Salvage completed: +{result['exp']} EXP, +{result['gold']} gold, {len(result['items'])} items")
+                    return result
+                else:
+                    # Gathering failed - check for energy/stamina issues
+                    error_msg = data.get("message", data.get("error", "Unknown error"))
+                    insufficient_energy = any(word in error_msg.lower() for word in ["energy", "stamina", "not enough", "insufficient"])
+                    
+                    self.logger.warning(f"Salvage failed: {error_msg}")
+                    return {
+                        "success": False,
+                        "error": error_msg,
+                        "insufficient_energy": insufficient_energy
+                    }
+            else:
+                item_info = f" '{material_name}'" if material_name else ""
+                self.logger.error(f"Salvage failed{item_info}: HTTP {response.status_code}")
+                try:
+                    error_data = response.json()
+                    error_msg = error_data.get("message", f"HTTP {response.status_code}")
+                except:
+                    error_msg = f"HTTP {response.status_code}"
+                return {"success": False, "error": error_msg}
+                
+        except Exception as e:
+            self.logger.error(f"Error salvaging material: {e}")
+            import traceback
+            self.logger.debug(traceback.format_exc())
+            return {"success": False, "error": str(e)}
     
     def _countdown(self, seconds: float, message: str = "Next travel in"):
         """Display a real-time countdown timer"""
@@ -641,22 +763,50 @@ class SimpleMMOBot:
             
             print(f"✓ Found {len(buttons)} CAPTCHA options for new challenge")
             
-            # Load AI model
-            model = CLIPModel.from_pretrained("openai/clip-vit-base-patch32")
-            processor = CLIPProcessor.from_pretrained("openai/clip-vit-base-patch32")
+            # Load AI model - check for fine-tuned version first
+            finetuned_path = "models/clip-captcha-finetuned"
+            if os.path.exists(finetuned_path):
+                print("🎯 Using fine-tuned CAPTCHA model")
+                model = CLIPModel.from_pretrained(finetuned_path)
+                processor = CLIPProcessor.from_pretrained(finetuned_path)
+            else:
+                model = CLIPModel.from_pretrained("openai/clip-vit-base-patch32")
+                processor = CLIPProcessor.from_pretrained("openai/clip-vit-base-patch32")
             
-            # Collect button images
+            # Wait for images to load
+            time.sleep(2)
+            
+            # Collect button images with improved error handling
             button_images = []
             for idx, button in enumerate(buttons):
                 try:
-                    img_element = button.find_element(By.TAG_NAME, 'img')
+                    # Try to find img element
+                    try:
+                        img_element = button.find_element(By.TAG_NAME, 'img')
+                    except:
+                        img_element = button.find_element(By.CSS_SELECTOR, 'img')
+                    
+                    # Wait for visibility
+                    WebDriverWait(driver, 2).until(EC.visibility_of(img_element))
+                    
                     screenshot = img_element.screenshot_as_png
+                    if not screenshot:
+                        screenshot = button.screenshot_as_png
+                    
                     image = Image.open(BytesIO(screenshot)).convert('RGB')
                     button_images.append({'idx': idx, 'button': button, 'image': image})
                 except Exception as e:
-                    self.logger.debug(f"Error loading button {idx+1}: {e}")
+                    self.logger.warning(f"Error loading button {idx+1}: {e}")
+                    # Fallback: screenshot whole button
+                    try:
+                        screenshot = button.screenshot_as_png
+                        image = Image.open(BytesIO(screenshot)).convert('RGB')
+                        button_images.append({'idx': idx, 'button': button, 'image': image})
+                    except:
+                        continue
             
             if len(button_images) < 4:
+                self.logger.error(f"Could only load {len(button_images)} button images")
                 return False
             
             # AI analysis (same as main CAPTCHA solver)
@@ -713,6 +863,17 @@ class SimpleMMOBot:
             best_match.click()
             time.sleep(4)
             
+            # Convert button images to bytes for auto-learning
+            button_images_bytes = []
+            for img_data in button_images:
+                try:
+                    from io import BytesIO
+                    img_bytes = BytesIO()
+                    img_data['image'].save(img_bytes, format='PNG')
+                    button_images_bytes.append(img_bytes.getvalue())
+                except:
+                    button_images_bytes.append(None)
+            
             # Check result
             current_url = driver.current_url
             page_source = driver.page_source
@@ -720,10 +881,38 @@ class SimpleMMOBot:
             if '/travel' in current_url or 'already verified' in page_source.lower():
                 print("✓ New CAPTCHA solved successfully!")
                 self.logger.info("New CAPTCHA solved!")
+                
+                # Record successful attempt for auto-learning
+                try:
+                    from auto_captcha_learner import AutoCaptchaLearner
+                    learner = AutoCaptchaLearner()
+                    learner.record_attempt(
+                        question=required_item,
+                        button_clicked=best_idx,
+                        success=True,
+                        button_images=button_images_bytes
+                    )
+                except Exception as e:
+                    self.logger.debug(f"Auto-learning save failed: {e}")
+                
                 return True
             else:
                 print(f"✗ New CAPTCHA also failed")
                 self._save_wrong_captcha_attempt(required_item, best_idx, button_images)
+                
+                # Record failed attempt for auto-learning
+                try:
+                    from auto_captcha_learner import AutoCaptchaLearner
+                    learner = AutoCaptchaLearner()
+                    learner.record_attempt(
+                        question=required_item,
+                        button_clicked=best_idx,
+                        success=False,
+                        button_images=button_images_bytes
+                    )
+                except Exception as e:
+                    self.logger.debug(f"Auto-learning save failed: {e}")
+                
                 return False
             
         except Exception as e:
@@ -840,18 +1029,27 @@ class SimpleMMOBot:
                 return False
             
             # Use CLIP AI model to identify images (works with icons/objects, not just text)
+            # Import required modules (local scope to avoid conflicts)
+            from PIL import Image
+            from io import BytesIO
+            import os
+            import torch
+            from transformers import CLIPProcessor, CLIPModel
+            
             try:
-                from PIL import Image
-                import os
-                import torch
-                from transformers import CLIPProcessor, CLIPModel
-                
                 print("Loading AI vision model (CLIP)...")
                 self.logger.info("Loading CLIP model for image recognition...")
                 
-                # Load CLIP model - this can recognize objects in images
-                model = CLIPModel.from_pretrained("openai/clip-vit-base-patch32")
-                processor = CLIPProcessor.from_pretrained("openai/clip-vit-base-patch32")
+                # Load CLIP model - check for fine-tuned version first
+                finetuned_path = "models/clip-captcha-finetuned"
+                if os.path.exists(finetuned_path):
+                    print("🎯 Using fine-tuned CAPTCHA model")
+                    model = CLIPModel.from_pretrained(finetuned_path)
+                    processor = CLIPProcessor.from_pretrained(finetuned_path)
+                else:
+                    # Load base CLIP model - this can recognize objects in images
+                    model = CLIPModel.from_pretrained("openai/clip-vit-base-patch32")
+                    processor = CLIPProcessor.from_pretrained("openai/clip-vit-base-patch32")
                 
                 print(f"Analyzing images to find: {required_item}")
                 self.logger.info(f"Using AI to identify: {required_item}")
@@ -859,28 +1057,71 @@ class SimpleMMOBot:
                 # Create debug folder
                 os.makedirs('captcha_ai_debug', exist_ok=True)
                 
+                # Wait for images to load (important!)
+                time.sleep(2)  # Give images time to load
+                
                 # Collect all button images
                 button_images = []
                 for idx, button in enumerate(buttons):
                     try:
-                        # Find image in button
-                        img_element = button.find_element(By.TAG_NAME, 'img')
+                        # Strategy 1: Find img tag inside button
+                        try:
+                            img_element = button.find_element(By.TAG_NAME, 'img')
+                        except:
+                            # Strategy 2: Find img with CSS selector (more flexible)
+                            img_element = button.find_element(By.CSS_SELECTOR, 'img')
+                        
+                        # Wait a moment for image to be visible
+                        WebDriverWait(driver, 2).until(
+                            EC.visibility_of(img_element)
+                        )
                         
                         # Take screenshot of the image
                         screenshot = img_element.screenshot_as_png
+                        
+                        if not screenshot:
+                            self.logger.warning(f"Button {idx+1}: Screenshot returned empty")
+                            # Try taking screenshot of whole button instead
+                            screenshot = button.screenshot_as_png
+                        
                         image = Image.open(BytesIO(screenshot)).convert('RGB')
                         
                         # Save for debugging
                         image.save(f'captcha_ai_debug/button_{idx+1}.png')
+                        self.logger.debug(f"Button {idx+1}: Successfully loaded image ({image.size})")
                         
                         button_images.append({'idx': idx, 'button': button, 'image': image})
                     except Exception as e:
-                        self.logger.debug(f"Error loading button {idx+1}: {e}")
-                        continue
+                        self.logger.warning(f"Error loading button {idx+1}: {e}")
+                        # Try one more time with whole button screenshot
+                        try:
+                            screenshot = button.screenshot_as_png
+                            image = Image.open(BytesIO(screenshot)).convert('RGB')
+                            image.save(f'captcha_ai_debug/button_{idx+1}_fallback.png')
+                            button_images.append({'idx': idx, 'button': button, 'image': image})
+                            self.logger.debug(f"Button {idx+1}: Used fallback (whole button screenshot)")
+                        except Exception as e2:
+                            self.logger.error(f"Button {idx+1}: Both strategies failed - {e2}")
+                            continue
                 
                 if not button_images:
                     self.logger.error("Could not load any button images")
+                    # Save page source for debugging
+                    with open('captcha_image_load_debug.html', 'w', encoding='utf-8') as f:
+                        f.write(driver.page_source)
+                    self.logger.error("Saved page HTML to captcha_image_load_debug.html for debugging")
+                    
+                    # Also try to get button HTML structure
+                    try:
+                        self.logger.error("Button structures:")
+                        for idx, button in enumerate(buttons):
+                            self.logger.error(f"Button {idx+1}: {button.get_attribute('outerHTML')[:200]}")
+                    except:
+                        pass
+                    
                     return False
+                
+                self.logger.info(f"Successfully loaded {len(button_images)}/{len(buttons)} button images")
                 
                 # Prepare text candidates - try variations with better prompts
                 text_variations = [
@@ -903,30 +1144,32 @@ class SimpleMMOBot:
                 print(f"  Using {len(text_variations)} text variations for matching")
                 self.logger.info(f"Using {len(text_variations)} text variations")
                 
+                # BEST PRACTICE: Process all images at once for better comparison
+                # CLIP is designed to compare multiple images simultaneously
+                all_images = [img_data['image'] for img_data in button_images]
+                
+                inputs = processor(
+                    text=text_variations,
+                    images=all_images,  # All 4 images at once
+                    return_tensors="pt",
+                    padding=True
+                )
+                
+                with torch.no_grad():
+                    outputs = model(**inputs)
+                    logits_per_image = outputs.logits_per_image  # Shape: [num_images, num_texts]
+                    probs = logits_per_image.softmax(dim=1)  # Normalize across text variations
+                
+                # Find best match for each image (max score across all text variations)
                 button_scores = []
                 best_match = None
                 best_score = 0
                 best_idx = -1
                 
-                for img_data in button_images:
+                for i, img_data in enumerate(button_images):
                     idx = img_data['idx']
-                    image = img_data['image']
-                    
-                    # Use CLIP to compare image with all text variations
-                    inputs = processor(
-                        text=text_variations,
-                        images=image,
-                        return_tensors="pt",
-                        padding=True
-                    )
-                    
-                    with torch.no_grad():
-                        outputs = model(**inputs)
-                        logits_per_image = outputs.logits_per_image
-                        probs = logits_per_image.softmax(dim=1)
-                    
-                    # Get the maximum probability across all text variations
-                    max_prob = probs.max().item()
+                    # Get max probability across all text variations for this image
+                    max_prob = probs[i].max().item()
                     score = int(max_prob * 100)
                     
                     button_scores.append({'idx': idx + 1, 'score': score, 'button': img_data['button']})
@@ -965,6 +1208,17 @@ class SimpleMMOBot:
                     self.logger.info(f"Clicking button {best_idx} with {best_score}% confidence and {margin}% margin...")
                     best_match.click()
                     
+                    # Convert button images to bytes for auto-learning
+                    button_images_bytes = []
+                    for img_data in button_images:
+                        try:
+                            from io import BytesIO
+                            img_bytes = BytesIO()
+                            img_data['image'].save(img_bytes, format='PNG')
+                            button_images_bytes.append(img_bytes.getvalue())
+                        except:
+                            button_images_bytes.append(None)
+                    
                     # Wait for page to process and redirect
                     print("  Waiting for verification...")
                     time.sleep(4)  # Give more time for redirect
@@ -997,11 +1251,39 @@ class SimpleMMOBot:
                         if redirected_to_travel or success_message:
                             print("✓ CAPTCHA solved successfully!")
                             self.logger.info("CAPTCHA solved successfully with AI!")
+                            
+                            # Record successful attempt for auto-learning
+                            try:
+                                from auto_captcha_learner import AutoCaptchaLearner
+                                learner = AutoCaptchaLearner()
+                                learner.record_attempt(
+                                    question=required_item,
+                                    button_clicked=best_idx,
+                                    success=True,
+                                    button_images=button_images_bytes
+                                )
+                            except Exception as e:
+                                self.logger.debug(f"Auto-learning save failed: {e}")
+                            
                             return True
                         elif not still_on_captcha and captcha_form_gone:
                             # Form is gone and not on CAPTCHA page anymore
                             print("✓ CAPTCHA solved successfully!")
                             self.logger.info("CAPTCHA solved - form disappeared")
+                            
+                            # Record successful attempt for auto-learning
+                            try:
+                                from auto_captcha_learner import AutoCaptchaLearner
+                                learner = AutoCaptchaLearner()
+                                learner.record_attempt(
+                                    question=required_item,
+                                    button_clicked=best_idx,
+                                    success=True,
+                                    button_images=button_images_bytes
+                                )
+                            except Exception as e:
+                                self.logger.debug(f"Auto-learning save failed: {e}")
+                            
                             return True
                         else:
                             # Double-check by visiting the CAPTCHA page again
@@ -1018,6 +1300,20 @@ class SimpleMMOBot:
                                 '/travel' in final_url):
                                 print("✓ CAPTCHA solved successfully! (confirmed on re-check)")
                                 self.logger.info("CAPTCHA verified on second check")
+                                
+                                # Record successful attempt for auto-learning
+                                try:
+                                    from auto_captcha_learner import AutoCaptchaLearner
+                                    learner = AutoCaptchaLearner()
+                                    learner.record_attempt(
+                                        question=required_item,
+                                        button_clicked=best_idx,
+                                        success=True,
+                                        button_images=button_images_bytes
+                                    )
+                                except Exception as e:
+                                    self.logger.debug(f"Auto-learning save failed: {e}")
+                                
                                 return True
                             
                             # Still on CAPTCHA page - check what happened
@@ -1035,8 +1331,22 @@ class SimpleMMOBot:
                                 print(f"⏱️  CAPTCHA cooldown/lockout detected")
                                 print(f"  AI picked button {best_idx} (confidence: {best_score}%)")
                                 
-                                # Save wrong answer for learning
+                                # Save wrong answer for learning (both old and new system)
                                 self._save_wrong_captcha_attempt(required_item, best_idx, button_images)
+                                
+                                # Record failed attempt for auto-learning
+                                try:
+                                    from auto_captcha_learner import AutoCaptchaLearner
+                                    learner = AutoCaptchaLearner()
+                                    learner.record_attempt(
+                                        question=required_item,
+                                        button_clicked=best_idx,
+                                        success=False,
+                                        button_images=button_images_bytes
+                                    )
+                                except Exception as e:
+                                    self.logger.debug(f"Auto-learning save failed: {e}")
+                                
                                 return False
                             
                             # 2. Check if question changed (new challenge)
@@ -1049,8 +1359,21 @@ class SimpleMMOBot:
                                     print(f"  New: {new_required_item}")
                                     print(f"  Attempting to solve new challenge...\n")
                                     
-                                    # Save wrong answer before retrying
+                                    # Save wrong answer before retrying (both old and new system)
                                     self._save_wrong_captcha_attempt(required_item, best_idx, button_images)
+                                    
+                                    # Record failed attempt for auto-learning
+                                    try:
+                                        from auto_captcha_learner import AutoCaptchaLearner
+                                        learner = AutoCaptchaLearner()
+                                        learner.record_attempt(
+                                            question=required_item,
+                                            button_clicked=best_idx,
+                                            success=False,
+                                            button_images=button_images_bytes
+                                        )
+                                    except Exception as e:
+                                        self.logger.debug(f"Auto-learning save failed: {e}")
                                     
                                     # Recursively retry with new question (max 2 retries)
                                     if not hasattr(self, '_captcha_retry_count'):
@@ -1076,8 +1399,22 @@ class SimpleMMOBot:
                             print(f"✗ Wrong answer - AI picked button {best_idx}")
                             print(f"  Confidence was {best_score}% with {margin}% margin")
                             
-                            # Save wrong answer for learning
+                            # Save wrong answer for learning (both old and new system)
                             self._save_wrong_captcha_attempt(required_item, best_idx, button_images)
+                            
+                            # Record failed attempt for auto-learning
+                            try:
+                                from auto_captcha_learner import AutoCaptchaLearner
+                                learner = AutoCaptchaLearner()
+                                learner.record_attempt(
+                                    question=required_item,
+                                    button_clicked=best_idx,
+                                    success=False,
+                                    button_images=button_images_bytes
+                                )
+                            except Exception as e:
+                                self.logger.debug(f"Auto-learning save failed: {e}")
+                            
                             return False
                     except Exception as check_error:
                         self.logger.error(f"Error checking CAPTCHA result: {check_error}")
@@ -1341,10 +1678,45 @@ class SimpleMMOBot:
             self.logger.error("No API token available")
             return {"success": False, "error": "No API token - refresh session"}
         
-        # First check if we're currently in an NPC battle
+        # First check if we're currently in an NPC battle or material gathering
         npc_battle_data = None
+        material_gather_data = None
+        
         try:
             travel_page = self.session.get(f"{self.base_url}/travel", allow_redirects=True)
+            page_html = travel_page.text
+            
+            # Check for material gathering encounter
+            import re
+            material_session_match = re.search(r'material_session_id["\s:]+(\d+)', page_html)
+            if material_session_match:
+                material_session_id = int(material_session_match.group(1))
+                self.logger.info(f"Detected material gathering opportunity (session_id: {material_session_id})")
+                
+                # Try to extract quantity and name
+                qty_match = re.search(r'Remaining Material["\s:]+(\d+)', page_html)
+                quantity = int(qty_match.group(1)) if qty_match else 1
+                
+                # Try to extract material name from HTML
+                name_match = re.search(r'material[_-]?name["\s:]+["\']([^"\'>]+)', page_html, re.IGNORECASE)
+                material_name = name_match.group(1) if name_match else None
+                
+                # Auto-gather if enabled
+                if self.config.get("auto_gather_materials", True):
+                    item_info = f" '{material_name}'" if material_name else ""
+                    self.logger.info(f"Auto-gathering material{item_info} (quantity: {quantity})...")
+                    gather_result = self.salvage_material(material_session_id, quantity, material_name)
+                    
+                    if gather_result.get("success"):
+                        material_gather_data = gather_result
+                        self.logger.info("Material gathered successfully, continuing with travel...")
+                    else:
+                        # If gathering failed (e.g., not enough energy), log it but continue
+                        error_msg = gather_result.get("error", "Unknown error")
+                        self.logger.warning(f"Material gathering failed: {error_msg}")
+                        if "energy" in error_msg.lower() or "stamina" in error_msg.lower():
+                            self.logger.info("Not enough energy for gathering, continuing with travel...")
+                        material_gather_data = {"success": False, "error": error_msg, "insufficient_energy": True}
             
             # Check if we got redirected to an NPC battle page
             if '/npcs/attack/' in travel_page.url or '/npcs/battle/' in travel_page.url:
@@ -1420,10 +1792,43 @@ class SimpleMMOBot:
                     # Parse the results
                     parsed = self._parse_travel_results(result_data)
                     
+                    # CHECK: If material detected but no session ID, reload /travel page to get it
+                    if parsed.get("material_encounter") and not parsed.get("material_session_id"):
+                        self.logger.info("Material detected in travel result but no session ID - checking travel page...")
+                        try:
+                            travel_page = self.session.get(f"{self.base_url}/travel", allow_redirects=True)
+                            page_html = travel_page.text
+                            
+                            # Extract material session ID from HTML
+                            import re
+                            material_session_match = re.search(r'material_session_id["\s:]+(\d+)', page_html)
+                            if material_session_match:
+                                material_session_id = int(material_session_match.group(1))
+                                parsed["material_session_id"] = material_session_id
+                                self.logger.info(f"Found material_session_id: {material_session_id}")
+                                
+                                # Try to extract quantity and name too
+                                qty_match = re.search(r'Remaining Material["\s:]+(\d+)', page_html)
+                                if qty_match:
+                                    parsed["material_quantity"] = int(qty_match.group(1))
+                                
+                                name_match = re.search(r'material[_-]?name["\s:]+["\']([^"\'>]+)', page_html, re.IGNORECASE)
+                                if name_match:
+                                    parsed["material_name"] = name_match.group(1)
+                            else:
+                                self.logger.warning("Material encounter detected but no material_session_id found on travel page")
+                                # Clear material_encounter flag since we can't gather without session ID
+                                parsed["material_encounter"] = False
+                        except Exception as e:
+                            self.logger.error(f"Error checking travel page for material: {e}")
+                            parsed["material_encounter"] = False
+                    
                     # Include NPC battle data if we fought an NPC
                     result = {"success": True, "data": result_data, "parsed": parsed}
                     if npc_battle_data:
                         result["npc_battle"] = npc_battle_data
+                    if material_gather_data:
+                        result["material_gather"] = material_gather_data
                     
                     return result
                 except Exception as e:
@@ -1432,6 +1837,8 @@ class SimpleMMOBot:
                     result = {"success": True, "data": {}, "parsed": {}}
                     if npc_battle_data:
                         result["npc_battle"] = npc_battle_data
+                    if material_gather_data:
+                        result["material_gather"] = material_gather_data
                     return result
             elif response.status_code == 429:
                 return {"success": False, "error": "Rate limited / Cooldown"}
@@ -1507,6 +1914,27 @@ class SimpleMMOBot:
                     print(f"{'='*60}\n")
                     return
                 
+                # Check if material gathering happened before travel (pre-travel check)
+                material_gather_data = result.get("material_gather")
+                if material_gather_data:
+                    if material_gather_data.get("success"):
+                        gather_exp = material_gather_data.get("exp", 0)
+                        gather_gold = material_gather_data.get("gold", 0)
+                        gather_items = material_gather_data.get("items", [])
+                        
+                        print(f"\n{'='*60}")
+                        print(f"🔨 MATERIAL GATHERED (Pre-Travel)")
+                        print(f"{'='*60}")
+                        if gather_exp > 0:
+                            print(f"  💫 +{gather_exp} EXP")
+                        if gather_gold > 0:
+                            print(f"  💰 +{gather_gold} gold")
+                        if gather_items:
+                            print(f"  🎁 +{len(gather_items)} items")
+                        print(f"{'='*60}\n")
+                    elif material_gather_data.get("insufficient_energy"):
+                        print(f"\n⚠️  Not enough energy for gathering - skipping...\n")
+                
                 # Check if NPC battle occurred before travel
                 npc_battle_data = result.get("npc_battle")
                 if npc_battle_data:
@@ -1548,6 +1976,34 @@ class SimpleMMOBot:
                         if len(msg) > 150:
                             msg = msg[:150] + "..."
                         print(f"  💬 {msg}")
+                    
+                    # Check for material gathering/salvage or event items
+                    if parsed.get("material_encounter"):
+                        material_session_id = parsed.get("material_session_id")
+                        material_name = parsed.get("material_name") or "Material"
+                        material_qty = parsed.get("material_quantity", 1)
+                        
+                        print(f"\n  🔨 {material_name} found! Gathering...")
+                        
+                        # Auto-gather the material
+                        gather_result = self.salvage_material(material_session_id, material_qty, material_name)
+                        
+                        if gather_result.get("success"):
+                            gather_exp = gather_result.get("exp", 0)
+                            gather_gold = gather_result.get("gold", 0)
+                            gather_items = gather_result.get("items", [])
+                            
+                            print(f"  ✅ Gathered successfully!")
+                            if gather_exp > 0:
+                                print(f"  💫 +{gather_exp} EXP")
+                            if gather_gold > 0:
+                                print(f"  💰 +{gather_gold} gold")
+                            if gather_items:
+                                print(f"  🎁 +{len(gather_items)} items")
+                        else:
+                            error_msg = gather_result.get('error', 'Unknown error')
+                            print(f"  ⚠️  Failed to gather '{material_name}': {error_msg}")
+                        print()
                     
                     # Show rewards with better detection
                     has_rewards = False

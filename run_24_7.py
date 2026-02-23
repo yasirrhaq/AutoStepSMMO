@@ -23,7 +23,9 @@ class AFK24x7Bot:
             'start_time': datetime.now(),
             'total_exp': 0,
             'total_gold': 0,
-            'total_items': 0
+            'total_items': 0,
+            'npc_battles': 0,
+            'materials_gathered': 0
         }
         
         # Uptime segment tracking (every 10 travels)
@@ -32,9 +34,9 @@ class AFK24x7Bot:
         self.segment_start_time = datetime.now()
         
         # Best practice settings
-        self.travels_before_break = random.randint(50, 100)  # Random break every 50-100 travels
-        self.break_duration_min = 5  # 5-10 minute breaks
-        self.break_duration_max = 10
+        self.travels_before_break = random.randint(100, 200)  # Random break every 100-200 travels (was 50-100)
+        self.break_duration_min = 1  # 1-3 minute breaks (was 5-10 minutes)
+        self.break_duration_max = 3
         
         # Session refresh interval (every 2-4 hours)
         self.session_refresh_hours = random.uniform(2, 4)
@@ -87,8 +89,32 @@ class AFK24x7Bot:
         print(f"💰 Total Gold: {self.stats['total_gold']:,}")
         print(f"🎁 Total Items: {self.stats['total_items']}")
         print(f"🤖 CAPTCHAs Solved: {self.stats['captchas_solved']}")
+        print(f"⚔️  NPC Battles: {self.stats['npc_battles']}")
+        print(f"🔨 Materials Gathered: {self.stats['materials_gathered']}")
         print(f"⚠️  Errors Recovered: {self.stats['errors']}")
         print(f"🔄 Bot Restarts: {self.stats['restarts']}")
+        
+        # Show settings
+        auto_battle_status = "✅ ON" if self.bot and self.bot.config.get("auto_battle_npcs", False) else "❌ OFF"
+        print(f"⚔️  Auto-Battle NPCs: {auto_battle_status}")
+        
+        # Show auto-learning status every 10 travels
+        if self.stats['travels_completed'] % 10 == 0:
+            try:
+                from auto_captcha_learner import AutoCaptchaLearner
+                learner = AutoCaptchaLearner()
+                status = learner.get_learning_status()
+                
+                if status['total_attempts'] > 0:
+                    print(f"\n🤖 CAPTCHA Auto-Learning:")
+                    print(f"   Total attempts: {status['total_attempts']} (✅ {status['successes']}, ❌ {status['failures']})")
+                    print(f"   Auto-labeled: {status['auto_labeled']} | Trainings: {status['trainings']}")
+                    if status['labels_until_next_training'] > 0:
+                        print(f"   {status['labels_until_next_training']} more labels until next training")
+                    else:
+                        print(f"   🎯 Ready for training!")
+            except Exception as e:
+                self.logger.debug(f"Could not show auto-learning status: {e}")
         
         # Calculate rates using total uptime in hours
         total_uptime_hours = total_uptime_seconds / 3600
@@ -155,13 +181,22 @@ class AFK24x7Bot:
         print("🌙 SimpleMMO 24/7 AFK MODE")
         print("="*60)
         print("Bot will run continuously with best practices:")
-        print("  ✓ Random breaks every 50-100 travels (5-10 mins)")
+        print("  ✓ Random breaks every 100-200 travels (1-3 mins)")
         print("  ✓ Session refresh every 2-4 hours")
         print("  ✓ Automatic error recovery")
         print("  ✓ CAPTCHA auto-solve enabled")
         print("  ✓ 15-20 second delays between travels")
+        print("  ✓ Auto-learning from CAPTCHA attempts")
         print("\nPress Ctrl+C to stop gracefully")
         print("="*60 + "\n")
+        
+        # Show auto-learning status
+        try:
+            from auto_captcha_learner import AutoCaptchaLearner
+            learner = AutoCaptchaLearner()
+            learner.print_status()
+        except Exception as e:
+            self.logger.debug(f"Could not load auto-learning status: {e}")
         
         consecutive_errors = 0
         
@@ -188,7 +223,14 @@ class AFK24x7Bot:
                 # Refresh session periodically
                 self.refresh_session()
                 
-                # Perform a single travel
+                # ===================================================================
+                # STEP 1: PRE-TRAVEL CHECKS (done automatically in bot.travel())
+                # - Checks for materials on travel page BEFORE making API call
+                # - Checks for NPC battles BEFORE making API call
+                # - Auto-gathers/battles if configured
+                # ===================================================================
+                
+                # Perform a single travel (includes pre-travel checks)
                 result = self.bot.travel()
                 
                 if result.get("success"):
@@ -206,6 +248,17 @@ class AFK24x7Bot:
                         if self.bot._solve_captcha():
                             print("✓ CAPTCHA solved! Continuing...\n")
                             self.stats['captchas_solved'] += 1
+                            
+                            # Show auto-learning activity
+                            try:
+                                from auto_captcha_learner import AutoCaptchaLearner
+                                learner = AutoCaptchaLearner()
+                                status = learner.get_learning_status()
+                                if status['auto_labeled'] > 0:
+                                    print(f"🤖 Auto-learning: {status['auto_labeled']} past failures labeled, {status['trainings']} trainings completed\n")
+                            except:
+                                pass
+                            
                             continue
                         else:
                             print("✗ CAPTCHA auto-solve reported failure")
@@ -223,9 +276,40 @@ class AFK24x7Bot:
                         
                         continue
                     
-                    # Check if NPC battle occurred before travel
+                    # Check if material gathering happened before travel (pre-travel check)
+                    # This is when materials were found on /travel page BEFORE the step
+                    material_gather_data = result.get("material_gather")
+                    if material_gather_data:
+                        if material_gather_data.get("success"):
+                            self.stats['materials_gathered'] += 1
+                            gather_exp = material_gather_data.get("exp", 0)
+                            gather_gold = material_gather_data.get("gold", 0)
+                            gather_items = material_gather_data.get("items", [])
+                            
+                            # Add to cumulative stats
+                            self.stats['total_exp'] += gather_exp
+                            self.stats['total_gold'] += gather_gold
+                            self.stats['total_items'] += len(gather_items)
+                            
+                            print(f"\n{'='*60}")
+                            print(f"🔨 MATERIAL GATHERED (Pre-Travel)")
+                            print(f"{'='*60}")
+                            if gather_exp > 0:
+                                print(f"  💫 +{gather_exp} EXP")
+                            if gather_gold > 0:
+                                print(f"  💰 +{gather_gold} gold")
+                            if gather_items:
+                                print(f"  🎁 +{len(gather_items)} items")
+                            print(f"{'='*60}\n")
+                        elif material_gather_data.get("insufficient_energy"):
+                            print(f"\n⚠️  Not enough energy for gathering - skipping...")
+                    
+                    # Check if NPC battle occurred before travel (pre-travel check)
+                    # This is when an NPC battle was found on /travel page BEFORE the step
                     npc_battle_data = result.get("npc_battle")
                     if npc_battle_data:
+                        self.stats['npc_battles'] += 1  # Track battle count
+                        
                         print(f"\n{'='*60}")
                         print(f"⚔️  NPC BATTLE COMPLETED")
                         print(f"{'='*60}")
@@ -277,6 +361,47 @@ class AFK24x7Bot:
                             if len(msg) > 150:
                                 msg = msg[:150] + "..."
                             print(f"  💬 {msg}")
+                        
+                        # Check for material gathering/salvage or event items
+                        # This is when materials are encountered DURING/AFTER the travel step
+                        if parsed.get("material_encounter"):
+                            material_session_id = parsed.get("material_session_id")
+                            material_name = parsed.get("material_name") or "Material"
+                            material_qty = parsed.get("material_quantity", 1)
+                            
+                            # Validate we have session ID before attempting to gather
+                            if not material_session_id:
+                                print(f"\n  🔨 {material_name} detected, but no session ID available")
+                                print(f"  ⚠️  Skipping gather (API response incomplete)")
+                                self.logger.warning(f"Material encounter detected but no session ID: {parsed.get('message', '')}")
+                            else:
+                                print(f"\n  🔨 {material_name} found! Gathering...")
+                                
+                                # Auto-gather the material
+                                gather_result = self.bot.salvage_material(material_session_id, material_qty, material_name)
+                                
+                                if gather_result.get("success"):
+                                    self.stats['materials_gathered'] += 1
+                                    gather_exp = gather_result.get("exp", 0)
+                                    gather_gold = gather_result.get("gold", 0)
+                                    gather_items = gather_result.get("items", [])
+                                    
+                                    # Add to cumulative stats
+                                    self.stats['total_exp'] += gather_exp
+                                    self.stats['total_gold'] += gather_gold
+                                    self.stats['total_items'] += len(gather_items)
+                                    
+                                    print(f"  ✅ Gathered successfully!")
+                                    if gather_exp > 0:
+                                        print(f"  💫 +{gather_exp} EXP")
+                                    if gather_gold > 0:
+                                        print(f"  💰 +{gather_gold} gold")
+                                    if gather_items:
+                                        print(f"  🎁 +{len(gather_items)} items")
+                                else:
+                                    error_msg = gather_result.get('error', 'Unknown error')
+                                    print(f"  ⚠️  Failed to gather '{material_name}': {error_msg}")
+                            print()
                         
                         # Show rewards
                         has_rewards = False
