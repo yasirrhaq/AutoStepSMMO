@@ -292,7 +292,7 @@ class AFK24x7Bot:
                             self.stats['total_items'] += len(gather_items)
                             
                             print(f"\n{'='*60}")
-                            print(f"🔨 MATERIAL GATHERED (Pre-Travel)")
+                            print(f"🔨 MATERIAL GATHERED")
                             print(f"{'='*60}")
                             if gather_exp > 0:
                                 print(f"  💫 +{gather_exp} EXP")
@@ -363,8 +363,9 @@ class AFK24x7Bot:
                             print(f"  💬 {msg}")
                         
                         # Check for material gathering/salvage or event items
-                        # This is when materials are encountered DURING/AFTER the travel step
-                        if parsed.get("material_encounter"):
+                        # Only attempt manual gather if travel() didn't already handle it
+                        # (simplemmo_bot now gathers inline when it detects type=material in the API response)
+                        if parsed.get("material_encounter") and not result.get("material_gather"):
                             material_session_id = parsed.get("material_session_id")
                             material_name = parsed.get("material_name") or "Material"
                             material_qty = parsed.get("material_quantity", 1)
