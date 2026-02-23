@@ -442,7 +442,9 @@ class SimpleMMOBot:
                     "", "gold", "exp", "experience", "none", "normal"
                 ):
                     import json as _json
-                    self.logger.info(f"[RAW TRAVEL] type={step_type!r} value={raw_value!r} text={str(text)[:120]!r}")
+                    # For item drops show the full text so HTML structure is visible
+                    _txt_preview = str(text) if step_type == "item" else str(text)[:120]
+                    self.logger.info(f"[RAW TRAVEL] type={step_type!r} value={raw_value!r} text={_txt_preview!r}")
                     self.logger.debug(f"[RAW TRAVEL FULL] {_json.dumps(data)[:500]}")
 
                 # Check for CAPTCHA challenge
@@ -525,11 +527,14 @@ class SimpleMMOBot:
                 # ── Item drop (type='item') — parse name and rarity from HTML text ──
                 if step_type == "item" and text:
                     import re as _re
+
                     _rarity_map = {
                         "common": "Common", "uncommon": "Uncommon", "rare": "Rare",
                         "elite": "Elite", "epic": "Epic", "legendary": "Legendary",
                         "mythic": "Mythic", "celestial": "Celestial",
                     }
+
+                    # ── Rarity from CSS class ────────────────────────────────
                     _rarity = "Common"
                     _rc = _re.search(
                         r"class=['\"][^'\"]*\b(common|uncommon|rare|elite|epic|legendary|mythic|celestial)\b[^'\"]*['\"]",
@@ -538,31 +543,65 @@ class SimpleMMOBot:
                     if _rc:
                         _rarity = _rarity_map.get(_rc.group(1).lower(), "Common")
 
+                    # ── Item name — 5 strategies, first match wins ───────────
                     _name = None
-                    # Try: <span class='...-item' ...>Name</span>
-                    _nm = _re.search(
-                        r"<span[^>]*class=['\"][^'\"]*(?:common|uncommon|rare|elite|epic|legendary|mythic|celestial)[^'\"]*['\"][^>]*>([^<]{2,60})</span>",
-                        text, _re.I
-                    )
-                    if _nm:
-                        _name = _nm.group(1).strip()
+
+                    # 1. Anchor tag INSIDE the rarity-class span
+                    #    <span class='rare-item' ...><a href="...">Sword of Doom</a></span>
                     if not _name:
-                        # Try: <a href="/items/...">Name</a>
-                        _am = _re.search(
-                            r"<a[^>]*href=['\"][^'\"]*?/items?/[^'\"]*['\"][^>]*>([^<]{2,60})</a>",
+                        _m = _re.search(
+                            r"class=['\"][^'\"]*(?:common|uncommon|rare|elite|epic|legendary|mythic|celestial)[^'\"]*['\"][^>]*>[^<]*<a[^>]*>([^<]{2,60})</a>",
                             text, _re.I
                         )
-                        if _am:
-                            _name = _am.group(1).strip()
+                        if _m:
+                            _name = _m.group(1).strip()
+
+                    # 2. Direct span text (no nested tag)
+                    #    <span class='common-item' ...>Iron Ball</span>
                     if not _name:
-                        # Fallback: any capitalised link text inside the HTML
-                        _tm = _re.search(r"<a[^>]+>([A-Z][a-zA-Z0-9\s'\-]{2,50})</a>", text)
-                        if _tm:
-                            _name = _tm.group(1).strip()
+                        _m = _re.search(
+                            r"class=['\"][^'\"]*(?:common|uncommon|rare|elite|epic|legendary|mythic|celestial)[^'\"]*['\"][^>]*>([^<]{2,60})</span>",
+                            text, _re.I
+                        )
+                        if _m:
+                            _name = _m.group(1).strip()
+
+                    # 3. Any anchor whose href contains /item(s)/ or /equipment/
+                    #    <a href="/items/1234">Iron Ball</a>
+                    if not _name:
+                        _m = _re.search(
+                            r"<a[^>]*href=['\"][^'\"]*(?:/items?/|/equipment/|/weapon/|/armou?r/)[^'\"]*['\"][^>]*>([^<]{2,60})</a>",
+                            text, _re.I
+                        )
+                        if _m:
+                            _name = _m.group(1).strip()
+
+                    # 4. Any anchor link text that looks like a proper noun
+                    if not _name:
+                        _m = _re.search(r"<a[^>]+>([A-Z][a-zA-Z0-9 '\-]{2,50})</a>", text)
+                        if _m:
+                            _name = _m.group(1).strip()
+
+                    # 5. Derive name from img src filename
+                    #    /img/icons/I_IronBall.png  ->  Iron Ball
+                    #    /img/icons/midnight/armour/Helmet1.png  ->  Helmet 1
+                    if not _name:
+                        _im = _re.search(r"/([^/]+)\.png", text, _re.I)
+                        if _im:
+                            _raw = _im.group(1)
+                            _raw = _re.sub(r'^[Ii][_-]', '', _raw)          # strip I_ prefix
+                            _raw = _re.sub(r'(?<=[a-z])(?=[A-Z])', ' ', _raw)  # CamelCase split
+                            _raw = _re.sub(r'(?<=[A-Z]{2})(?=[A-Z][a-z])', ' ', _raw)  # ABCDef -> ABC Def
+                            _raw = _re.sub(r'([0-9]+)', r' \1', _raw)      # digits get a space
+                            _raw = _re.sub(r'[_-]', ' ', _raw)              # underscores -> spaces
+                            _raw = _re.sub(r'  +', ' ', _raw).strip()
+                            if _raw and len(_raw) >= 2:
+                                _name = _raw
+
                     if not _name:
                         _name = "Unknown Item"
 
-                    # Only populate if not already filled from structured data
+                    # Only populate if not already filled from structured API data
                     if not results["items"]:
                         results["items"].append({"name": _name, "rarity": _rarity, "quantity": 1})
 
