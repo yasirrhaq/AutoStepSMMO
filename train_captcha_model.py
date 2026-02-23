@@ -26,39 +26,50 @@ import numpy as np
 class CaptchaDataset(Dataset):
     """Dataset for CAPTCHA training"""
     
-    def __init__(self, captcha_learning_dir: str, labels_file: str, processor):
+    def __init__(self, captcha_learning_dir: str, processor):
         self.captcha_dir = Path(captcha_learning_dir)
         self.processor = processor
-        
-        # Load labels
-        with open(labels_file, 'r') as f:
-            self.labels = json.load(f)
-        
-        # Build dataset
         self.samples = []
-        for attempt_folder, label_data in self.labels.items():
-            folder_path = self.captcha_dir / attempt_folder
-            if not folder_path.exists():
+        
+        # Scan both successes/ and failures/ for labeled attempts
+        for subdir in ['successes', 'failures']:
+            dir_path = self.captcha_dir / subdir
+            if not dir_path.exists():
                 continue
             
-            correct_button = label_data['correct_button']
-            question = label_data['question']
-            
-            # Load all button images
-            for button_idx in range(1, 5):
-                img_path = folder_path / f"button_{button_idx}.png"
-                if img_path.exists():
-                    # Label: 1 if this is correct button, 0 if wrong
-                    is_correct = 1.0 if button_idx == correct_button else 0.0
-                    
-                    self.samples.append({
-                        'image_path': str(img_path),
-                        'question': question,
-                        'label': is_correct,
-                        'button_idx': button_idx
-                    })
+            for attempt_folder in dir_path.iterdir():
+                if not attempt_folder.is_dir():
+                    continue
+                
+                metadata_file = attempt_folder / "metadata.json"
+                if not metadata_file.exists():
+                    continue
+                
+                try:
+                    with open(metadata_file, 'r') as f:
+                        metadata = json.load(f)
+                except Exception:
+                    continue
+                
+                correct_button = metadata.get("correct_answer")
+                if correct_button is None:
+                    continue  # Skip unlabeled failures
+                
+                question = metadata.get("question", "")
+                
+                # Load all button images for this attempt
+                for button_idx in range(1, 5):
+                    img_path = attempt_folder / f"button_{button_idx}.png"
+                    if img_path.exists():
+                        self.samples.append({
+                            'image_path': str(img_path),
+                            'question': question,
+                            'label': 1.0 if button_idx == correct_button else 0.0,
+                            'button_idx': button_idx
+                        })
         
-        print(f"Loaded {len(self.samples)} training samples from {len(self.labels)} attempts")
+        labeled_attempts = len(self.samples) // 4 if self.samples else 0
+        print(f"Loaded {len(self.samples)} training samples from ~{labeled_attempts} labeled attempts")
     
     def __len__(self):
         return len(self.samples)
@@ -69,12 +80,14 @@ class CaptchaDataset(Dataset):
         # Load image
         image = Image.open(sample['image_path']).convert('RGB')
         
-        # Process image and text
+        # Process image and text — max_length=77 is CLIP's token limit
         inputs = self.processor(
             text=[f"a {sample['question']}"],
             images=image,
             return_tensors="pt",
-            padding=True
+            padding='max_length',
+            truncation=True,
+            max_length=77
         )
         
         return {
@@ -87,7 +100,6 @@ class CaptchaDataset(Dataset):
 
 def train_model(
     captcha_learning_dir="captcha_learning",
-    labels_file="captcha_learning/labels.json",
     output_dir="models/clip-captcha-finetuned",
     epochs=10,
     batch_size=4,
@@ -99,11 +111,18 @@ def train_model(
     print("🤖 CAPTCHA Model Training")
     print("="*60)
     
-    # Check if labels file exists
-    if not os.path.exists(labels_file):
-        print(f"\n❌ Labels file not found: {labels_file}")
-        print("\nYou need to create labels.json first!")
-        print("Run: python label_captcha_attempts.py")
+    # Check that at least one labeled attempt exists
+    captcha_path = Path(captcha_learning_dir)
+    has_data = False
+    for subdir in ['successes', 'failures']:
+        d = captcha_path / subdir
+        if d.exists() and any(d.iterdir()):
+            has_data = True
+            break
+    
+    if not has_data:
+        print(f"\n❌ No captcha learning data found in: {captcha_learning_dir}")
+        print("The bot needs to run first so it can collect CAPTCHA attempts.")
         return False
     
     # Load processor and model
@@ -119,7 +138,7 @@ def train_model(
     
     # Create dataset
     print("\n📂 Loading training data...")
-    dataset = CaptchaDataset(captcha_learning_dir, labels_file, processor)
+    dataset = CaptchaDataset(captcha_learning_dir, processor)
     
     if len(dataset) == 0:
         print("❌ No training data found!")
@@ -160,8 +179,9 @@ def train_model(
                 return_dict=True
             )
             
-            # Calculate similarity (logits)
-            logits = outputs.logits_per_image.squeeze()
+            # logits_per_image is [B, B] (cross-similarity matrix).
+            # Take the diagonal to get per-sample score: similarity(image_i, text_i).
+            logits = outputs.logits_per_image.diagonal()
             
             # Calculate loss (we want correct=1, wrong=0)
             loss = loss_fn(logits, labels)
@@ -203,34 +223,9 @@ def train_model(
 if __name__ == "__main__":
     import sys
     
-    # Check if labels file exists
-    if not os.path.exists("captcha_learning/labels.json"):
-        print("="*60)
-        print("⚠️  No labels.json found!")
-        print("="*60)
-        print("\nBefore training, you need to label your saved attempts.")
-        print("This tells the AI which button was correct for each CAPTCHA.\n")
-        print("Run the labeling tool:")
-        print("  python label_captcha_attempts.py\n")
-        print("Or manually create captcha_learning/labels.json:")
-        print("""
-{
-  "attempt_20260223_041233": {
-    "question": "Cherry",
-    "correct_button": 3
-  },
-  "attempt_20260223_041548": {
-    "question": "Strawberry",
-    "correct_button": 1
-  }
-}
-""")
-        sys.exit(1)
-    
     # Train model
     success = train_model(
         captcha_learning_dir="captcha_learning",
-        labels_file="captcha_learning/labels.json",
         output_dir="models/clip-captcha-finetuned",
         epochs=10,  # Increase for better results (may take longer)
         batch_size=4,  # Reduce if you get out-of-memory errors

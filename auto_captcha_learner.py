@@ -105,6 +105,9 @@ class AutoCaptchaLearner:
             "question": question,
             "button_clicked": button_clicked,
             "success": success,
+            # correct_answer: auto-set for successes (selected button was correct),
+            # None for failures (requires manual labeling or auto-label from a later success)
+            "correct_answer": button_clicked if success else None,
             "timestamp": timestamp,
             "datetime": datetime.now().isoformat()
         }
@@ -127,59 +130,155 @@ class AutoCaptchaLearner:
         # If success, immediately try to auto-label past failures
         if success:
             self._auto_label_from_success(question, button_clicked)
+        else:
+            # Immediately auto-label this failure with base CLIP
+            self._auto_label_with_clip(attempt_path, question)
         
         self.save_stats()
         
         return str(attempt_path)
     
+    def _auto_label_with_clip(self, attempt_path: Path, question: str):
+        """
+        Use base CLIP to predict the correct button for a newly recorded failure.
+
+        Loads button_1.png … button_4.png from attempt_path and scores them
+        against the question text.  Writes correct_answer into metadata.json
+        immediately so the failure is training-ready without waiting for a
+        matching success attempt.
+        """
+        try:
+            from PIL import Image as PILImage
+            import torch
+            from transformers import CLIPModel, CLIPProcessor
+        except ImportError:
+            return  # CLIP not installed — skip silently
+
+        button_images = []
+        for btn_num in range(1, 5):
+            img_path = attempt_path / f"button_{btn_num}.png"
+            if img_path.exists():
+                try:
+                    button_images.append(PILImage.open(img_path).convert("RGB"))
+                except Exception:
+                    pass
+
+        if len(button_images) == 0:
+            return
+
+        try:
+            model_id = "openai/clip-vit-base-patch32"
+            # Reuse a cached instance if available on the class to avoid
+            # re-loading 600 MB of weights on every failure.
+            if not hasattr(AutoCaptchaLearner, "_clip_model"):
+                AutoCaptchaLearner._clip_model     = CLIPModel.from_pretrained(model_id)
+                AutoCaptchaLearner._clip_processor = CLIPProcessor.from_pretrained(model_id)
+                AutoCaptchaLearner._clip_model.eval()
+
+            clip_model = AutoCaptchaLearner._clip_model
+            clip_proc  = AutoCaptchaLearner._clip_processor
+
+            text_variations = [
+                question, question.lower(), question.title(),
+                f"a {question}", f"an {question}", f"the {question}",
+                f"{question} item", f"{question} object",
+                f"picture of {question}", f"image of {question}",
+                f"a photo of {question}",
+            ]
+
+            with torch.no_grad():
+                inputs = clip_proc(
+                    text=text_variations,
+                    images=button_images,
+                    return_tensors="pt",
+                    padding=True,
+                    truncation=True,
+                )
+                outputs = clip_model(**inputs)
+                probs   = outputs.logits_per_image.softmax(dim=1)
+
+            scores = [
+                (idx + 1, float(probs[idx].max()) * 100)
+                for idx in range(len(button_images))
+            ]
+            scores.sort(key=lambda x: x[1], reverse=True)
+            best_button, best_conf = scores[0]
+            margin = best_conf - scores[1][1] if len(scores) > 1 else best_conf
+
+            # Update metadata.json with prediction
+            metadata_path = attempt_path / "metadata.json"
+            with open(metadata_path, "r") as f:
+                metadata = json.load(f)
+
+            metadata["correct_answer"]  = best_button
+            metadata["auto_labeled"]    = True
+            metadata["auto_label_conf"] = round(best_conf, 2)
+            metadata["auto_label_tool"] = "base-clip-realtime"
+            metadata["labeled_at"]      = datetime.now().isoformat()
+
+            with open(metadata_path, "w") as f:
+                json.dump(metadata, f, indent=2)
+
+            self.stats["auto_labeled"] = self.stats.get("auto_labeled", 0) + 1
+            self.stats["labels_since_training"] = self.stats.get("labels_since_training", 0) + 1
+
+            print(
+                f"  🤖 CLIP auto-labeled failure: '{question}' → "
+                f"btn {best_button} (conf {best_conf:.1f}%, margin {margin:.1f}%)"
+            )
+
+            self._check_auto_training()
+
+        except Exception as e:
+            print(f"  ⚠️  CLIP auto-label failed: {e}")
+
     def _auto_label_from_success(self, question: str, correct_button: int):
         """
-        Automatically label past failures based on a successful attempt
-        
-        When bot succeeds on a question it previously failed, we now know
-        which button was correct, so we can retroactively label those failures.
+        Automatically label past failures based on a successful attempt.
+
+        When the bot succeeds on a question it previously failed, we now know
+        which button was correct, so we retroactively set correct_answer in each
+        matching failure's metadata.json.
         """
         new_labels = 0
-        
-        # Check all failed attempts
+
         if not self.failed_dir.exists():
             return
-        
+
         for failed_attempt in self.failed_dir.iterdir():
             if not failed_attempt.is_dir():
                 continue
-            
-            # Skip if already labeled
-            if failed_attempt.name in self.labels:
-                continue
-            
-            # Read metadata
+
             metadata_file = failed_attempt / "metadata.json"
             if not metadata_file.exists():
                 continue
-            
+
             with open(metadata_file, 'r') as f:
                 metadata = json.load(f)
-            
+
+            # Skip already labeled
+            if metadata.get("correct_answer") is not None:
+                continue
+
             # Check if question matches
             if metadata.get("question", "").lower().strip() == question.lower().strip():
-                # Auto-label this failure with the correct button
-                self.labels[failed_attempt.name] = {
-                    "question": question,
-                    "correct_button": correct_button,
-                    "auto_labeled": True,
-                    "labeled_at": datetime.now().isoformat()
-                }
+                # Write correct_answer directly into the metadata file
+                metadata["correct_answer"] = correct_button
+                metadata["auto_labeled"] = True
+                metadata["labeled_at"] = datetime.now().isoformat()
+
+                with open(metadata_file, 'w') as f:
+                    json.dump(metadata, f, indent=2)
+
                 new_labels += 1
-        
+
         if new_labels > 0:
             self.stats['auto_labeled'] += new_labels
             self.stats['labels_since_training'] += new_labels
-            self.save_labels()
             self.save_stats()
-            
-            print(f"🤖 Auto-labeled {new_labels} past failure(s) for question: {question}")
-            
+
+            print(f"Auto-labeled {new_labels} past failure(s) for question: {question}")
+
             # Check if we should trigger automatic training
             self._check_auto_training()
     
@@ -264,13 +363,28 @@ class AutoCaptchaLearner:
     def get_learning_status(self) -> Dict:
         """
         Get current learning status
-        
-        Returns dict with statistics about the learning system
+
+        Returns dict with statistics about the learning system.
         """
-        # Count files
         success_count = len([d for d in self.success_dir.iterdir() if d.is_dir()]) if self.success_dir.exists() else 0
         failed_count = len([d for d in self.failed_dir.iterdir() if d.is_dir()]) if self.failed_dir.exists() else 0
-        labeled_count = len(self.labels)
+
+        # Count labeled failures (correct_answer set in metadata.json)
+        labeled_count = 0
+        if self.failed_dir.exists():
+            for d in self.failed_dir.iterdir():
+                if not d.is_dir():
+                    continue
+                meta = d / "metadata.json"
+                if meta.exists():
+                    try:
+                        with open(meta) as f:
+                            m = json.load(f)
+                        if m.get("correct_answer") is not None:
+                            labeled_count += 1
+                    except Exception:
+                        pass
+
         unlabeled_count = failed_count - labeled_count
         
         return {

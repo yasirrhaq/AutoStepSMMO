@@ -430,54 +430,73 @@ class SimpleMMOBot:
                 text = data.get("text", "")
                 results["message"] = text
                 
+                # SimpleMMO uses a 'type' field to signal what happened this step
+                step_type = str(data.get("type", "") or data.get("rewardType", "") or "").lower()
+                
                 # Check for CAPTCHA challenge
                 if "i-am-not-a-bot" in text.lower() or "hold up" in text.lower():
                     results["captcha"] = True
                     return results
                 
-                # Check for NPC encounter
-                # API might return: npc_id, npc, encounter_npc, battle, etc.
+                # ── NPC encounter detection ──────────────────────────────────
+                # Priority 1: explicit 'type' field from API
+                npc_from_type = step_type in ("npc", "battle", "enemy", "encounter", "pvp", "monster")
+                
+                # Priority 2: explicit npc_id field
                 npc_id = data.get("npc_id") or data.get("npcId") or data.get("encounter_npc_id")
                 npc_name = data.get("npc_name") or data.get("npcName") or data.get("encounter_npc_name")
                 
-                # Also check if there's an NPC object
+                # Priority 3: nested npc object
                 npc_data = data.get("npc") or data.get("encounter") or data.get("battle")
                 if isinstance(npc_data, dict):
                     npc_id = npc_id or npc_data.get("id") or npc_data.get("npc_id")
                     npc_name = npc_name or npc_data.get("name") or npc_data.get("npc_name")
                 
-                # Check text for NPC encounter indicators
-                if npc_id or "attack" in text.lower() or "enemy" in text.lower() or "npc" in text.lower():
+                # Only flag as NPC encounter if we have concrete evidence
+                # (avoid false positives from normal travel text)
+                if npc_from_type or npc_id:
                     results["npc_encounter"] = True
                     results["npc_id"] = npc_id
                     results["npc_name"] = npc_name
                 
-                # Check for material gathering/salvage encounter
-                material_session_id = data.get("material_session_id") or data.get("materialSessionId")
+                # ── Material/gathering encounter detection ───────────────────
+                # Priority 1: explicit 'type' field from API
+                material_from_type = step_type in (
+                    "material", "gather", "gathering", "salvage",
+                    "materialgather", "material_gather", "item"
+                )
                 
-                # More specific material detection - only if we have concrete indicators
+                # Priority 2: session ID field — try every known name variant
+                nested = data.get("data", {})
+                nested = nested if isinstance(nested, dict) else {}
+                material_session_id = (
+                    data.get("material_session_id") or data.get("materialSessionId")
+                    or data.get("gathering_session_id") or data.get("gatheringSessionId")
+                    or data.get("session_id")
+                    or nested.get("material_session_id") or nested.get("materialSessionId")
+                    or nested.get("gathering_session_id") or nested.get("session_id")
+                )
+                
+                # Priority 3: text keywords
                 has_material_keywords = False
                 if text:
                     text_lower = text.lower()
-                    # Look for specific material-related phrases, not just any occurrence
                     material_phrases = [
-                        "material found",
-                        "salvage material",
-                        "gather material",
-                        "gathering material",
-                        "you found material",
-                        "discovered material",
-                        "material discovered"
+                        "material found", "salvage material", "gather material",
+                        "gathering material", "you found material", "discovered material",
+                        "material discovered", "you found some", "material awaits"
                     ]
                     has_material_keywords = any(phrase in text_lower for phrase in material_phrases)
                 
-                # Only mark as material_encounter if we have session ID or strong indicators
-                if material_session_id or has_material_keywords:
+                if material_from_type or material_session_id or has_material_keywords:
                     results["material_encounter"] = True
                     results["material_session_id"] = material_session_id
-                    results["material_quantity"] = data.get("quantity", data.get("amount", 1))
-                    # Try to extract material name from text or data
-                    results["material_name"] = data.get("material_name") or data.get("materialName") or data.get("name")
+                    results["material_quantity"] = data.get("quantity", data.get("amount",
+                        nested.get("quantity", nested.get("amount", 1))))
+                    results["material_name"] = (
+                        data.get("material_name") or data.get("materialName")
+                        or data.get("name") or nested.get("name")
+                    )
                 
                 # Get reward info - PRIMARY reward fields
                 reward_type = data.get("rewardType", "none")
@@ -592,20 +611,34 @@ class SimpleMMOBot:
             item_info = f" '{material_name}'" if material_name else ""
             self.logger.info(f"Salvaging material{item_info} (session_id: {material_session_id}, quantity: {quantity})")
             
-            # POST request to salvage
+            # POST request to salvage — use form-encoded data (not JSON)
+            headers = {
+                'X-XSRF-TOKEN': self.csrf_token,
+                'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8',
+                'Accept': 'application/json',
+                'Origin': 'https://web.simple-mmo.com',
+                'Referer': f'{self.base_url}/travel',
+            }
+            if self.api_token:
+                headers['Authorization'] = f'Bearer {self.api_token}'
+
             payload = {
-                "id": material_session_id,
-                "quantity": quantity
+                'material_session_id': material_session_id,
+                'id': material_session_id,  # some endpoints use 'id'
+                'quantity': quantity
             }
             
-            response = self.session.post(gather_url, json=payload)
+            response = self.session.post(gather_url, headers=headers, data=payload)
             
             if response.status_code == 200:
                 data = response.json()
                 
                 # Check if gathering actually succeeded
                 status = data.get("status", "").lower()
-                if status == "success" or data.get("type") == "success":
+                if (status == "success"
+                        or data.get("type") == "success"
+                        or data.get("success") is True
+                        or status not in ("", "error", "fail", "failed")):
                     # Parse rewards from salvage
                     result = {
                         "success": True,
@@ -660,47 +693,6 @@ class SimpleMMOBot:
             time.sleep(fractional)
         
         print("\r" + " " * 50 + "\r", end='', flush=True)  # Clear the line
-    
-    def _save_wrong_captcha_attempt(self, required_item: str, selected_button: int, button_images: list):
-        """Save wrong CAPTCHA attempts for future learning"""
-        try:
-            import json
-            import os
-            from datetime import datetime
-            
-            # Create learning data folder
-            os.makedirs('captcha_learning', exist_ok=True)
-            
-            # Save the attempt with timestamp
-            attempt_data = {
-                'timestamp': datetime.now().isoformat(),
-                'required_item': required_item,
-                'selected_button': selected_button,
-                'total_buttons': len(button_images)
-            }
-            
-            # Append to learning log
-            log_file = 'captcha_learning/wrong_attempts.jsonl'
-            with open(log_file, 'a', encoding='utf-8') as f:
-                f.write(json.dumps(attempt_data) + '\n')
-            
-            # Save button images for this attempt
-            attempt_folder = f'captcha_learning/attempt_{datetime.now().strftime("%Y%m%d_%H%M%S")}'
-            os.makedirs(attempt_folder, exist_ok=True)
-            
-            # Save metadata
-            with open(f'{attempt_folder}/metadata.json', 'w') as f:
-                json.dump(attempt_data, f, indent=2)
-            
-            # Save images
-            for img_data in button_images:
-                idx = img_data['idx'] + 1
-                img_data['image'].save(f'{attempt_folder}/button_{idx}.png')
-            
-            self.logger.info(f"Saved wrong attempt data to {attempt_folder}")
-            
-        except Exception as e:
-            self.logger.debug(f"Failed to save learning data: {e}")
     
     def _extract_required_item(self, page_source: str) -> str:
         """Extract the required item name from CAPTCHA page"""
@@ -765,7 +757,8 @@ class SimpleMMOBot:
             
             # Load AI model - check for fine-tuned version first
             finetuned_path = "models/clip-captcha-finetuned"
-            if os.path.exists(finetuned_path):
+            used_finetuned = os.path.exists(finetuned_path) and self.config.get("use_finetuned_captcha", True)
+            if used_finetuned:
                 print("🎯 Using fine-tuned CAPTCHA model")
                 model = CLIPModel.from_pretrained(finetuned_path)
                 processor = CLIPProcessor.from_pretrained(finetuned_path)
@@ -854,7 +847,38 @@ class SimpleMMOBot:
             best_score = int(scores[0][1])
             second_best_score = int(scores[1][1]) if len(scores) > 1 else 0
             margin = best_score - second_best_score
-            
+
+            # Fallback: if fine-tuned gave low confidence, re-score with base CLIP
+            if used_finetuned and (best_score < 60 or margin < 15):
+                print(f"⚠ Fine-tuned confidence low ({best_score}%, margin {margin}%) — trying base CLIP as fallback...")
+                self.logger.warning(f"Fine-tuned low confidence ({best_score}%, margin {margin}%), falling back to base CLIP")
+                base_model = CLIPModel.from_pretrained("openai/clip-vit-base-patch32")
+                base_proc  = CLIPProcessor.from_pretrained("openai/clip-vit-base-patch32")
+                base_inputs = base_proc(
+                    text=[required_item, required_item.lower(), required_item.title(),
+                          f"a {required_item}", f"an {required_item}", f"the {required_item}",
+                          f"{required_item} item", f"picture of {required_item}",
+                          f"image of {required_item}", f"{required_item} object"],
+                    images=[img_data['image'] for img_data in button_images],
+                    return_tensors="pt", padding='max_length', truncation=True, max_length=77
+                )
+                base_probs = base_model(**base_inputs).logits_per_image.softmax(dim=1)
+                base_scores = sorted(
+                    [(i, max(base_probs[i].tolist()) * 100) for i in range(len(button_images))],
+                    key=lambda x: x[1], reverse=True
+                )
+                base_best  = int(base_scores[0][1])
+                base_margin = base_best - int(base_scores[1][1]) if len(base_scores) > 1 else base_best
+                print(f"  Base CLIP: Button {base_scores[0][0]+1} with {base_best}% confidence (margin {base_margin}%)")
+                if base_best > best_score:
+                    print(f"  Switching to base CLIP result (higher confidence: {base_best}% > {best_score}%)")
+                    scores    = base_scores
+                    best_idx  = scores[0][0] + 1
+                    best_score = base_best
+                    margin    = base_margin
+                else:
+                    print(f"  Keeping fine-tuned result ({best_score}% >= base {base_best}%)")
+
             print(f"\nBest match for new challenge: Button {best_idx} with {best_score}% confidence")
             
             # Click the best match
@@ -898,7 +922,6 @@ class SimpleMMOBot:
                 return True
             else:
                 print(f"✗ New CAPTCHA also failed")
-                self._save_wrong_captcha_attempt(required_item, best_idx, button_images)
                 
                 # Record failed attempt for auto-learning
                 try:
@@ -1042,7 +1065,8 @@ class SimpleMMOBot:
                 
                 # Load CLIP model - check for fine-tuned version first
                 finetuned_path = "models/clip-captcha-finetuned"
-                if os.path.exists(finetuned_path):
+                used_finetuned = os.path.exists(finetuned_path) and self.config.get("use_finetuned_captcha", True)
+                if used_finetuned:
                     print("🎯 Using fine-tuned CAPTCHA model")
                     model = CLIPModel.from_pretrained(finetuned_path)
                     processor = CLIPProcessor.from_pretrained(finetuned_path)
@@ -1193,16 +1217,43 @@ class SimpleMMOBot:
                 
                 print(f"\nBest match: Button {best_idx} with {best_score}% confidence")
                 self.logger.info(f"Best match: Button {best_idx} with {best_score}% confidence")
-                
-                # AGGRESSIVE MODE: Always click best match, just warn if low confidence
-                if best_score < 60:
+
+                # Fallback: if fine-tuned gave low confidence, re-score with base CLIP
+                if used_finetuned and (best_score < 60 or margin < 8):
+                    print(f"⚠ Fine-tuned confidence low ({best_score}%, margin {margin}%) — trying base CLIP as fallback...")
+                    self.logger.warning(f"Fine-tuned low confidence ({best_score}%, margin {margin}%), falling back to base CLIP")
+                    base_model = CLIPModel.from_pretrained("openai/clip-vit-base-patch32")
+                    base_proc  = CLIPProcessor.from_pretrained("openai/clip-vit-base-patch32")
+                    with torch.no_grad():
+                        base_probs = base_model(**base_proc(
+                            text=text_variations, images=all_images,
+                            return_tensors="pt", padding='max_length', truncation=True, max_length=77
+                        )).logits_per_image.softmax(dim=1)
+                    base_button_scores = []
+                    for i, img_data in enumerate(button_images):
+                        base_s = int(base_probs[i].max().item() * 100)
+                        base_button_scores.append({'idx': img_data['idx'] + 1, 'score': base_s, 'button': img_data['button']})
+                        print(f"  [Base CLIP] Button {img_data['idx']+1}: {base_s}%")
+                    base_sorted = sorted(base_button_scores, key=lambda x: x['score'], reverse=True)
+                    base_best   = base_sorted[0]['score']
+                    base_margin = base_best - base_sorted[1]['score'] if len(base_sorted) >= 2 else base_best
+                    print(f"  Base CLIP best: Button {base_sorted[0]['idx']} with {base_best}% (margin {base_margin}%)")
+                    if base_best > best_score:
+                        print(f"  Switching to base CLIP result (higher confidence: {base_best}% > {best_score}%)")
+                        self.logger.info(f"Using base CLIP fallback: {base_best}% > finetuned {best_score}%")
+                        best_match = base_sorted[0]['button']
+                        best_idx   = base_sorted[0]['idx']
+                        best_score = base_best
+                        margin     = base_margin
+                    else:
+                        print(f"  Keeping fine-tuned result ({best_score}% >= base {base_best}%)")
+                elif best_score < 60:
                     print(f"⚠ WARNING: Low AI confidence ({best_score}%) - might be wrong!")
                     self.logger.warning(f"Low confidence: {best_score}%")
-                
+
                 if margin < 8:
-                    print(f"⚠ WARNING: Scores very close (margin: {margin}%) - AI is guessing!")
                     self.logger.warning(f"Small margin: {margin}%")
-                
+
                 if best_match:
                     print(f"→ Clicking button {best_idx} (best guess)...")
                     self.logger.info(f"Clicking button {best_idx} with {best_score}% confidence and {margin}% margin...")
@@ -1331,9 +1382,6 @@ class SimpleMMOBot:
                                 print(f"⏱️  CAPTCHA cooldown/lockout detected")
                                 print(f"  AI picked button {best_idx} (confidence: {best_score}%)")
                                 
-                                # Save wrong answer for learning (both old and new system)
-                                self._save_wrong_captcha_attempt(required_item, best_idx, button_images)
-                                
                                 # Record failed attempt for auto-learning
                                 try:
                                     from auto_captcha_learner import AutoCaptchaLearner
@@ -1358,9 +1406,6 @@ class SimpleMMOBot:
                                     print(f"  Previous: {required_item}")
                                     print(f"  New: {new_required_item}")
                                     print(f"  Attempting to solve new challenge...\n")
-                                    
-                                    # Save wrong answer before retrying (both old and new system)
-                                    self._save_wrong_captcha_attempt(required_item, best_idx, button_images)
                                     
                                     # Record failed attempt for auto-learning
                                     try:
@@ -1398,9 +1443,6 @@ class SimpleMMOBot:
                             self.logger.warning("CAPTCHA submission failed - wrong answer")
                             print(f"✗ Wrong answer - AI picked button {best_idx}")
                             print(f"  Confidence was {best_score}% with {margin}% margin")
-                            
-                            # Save wrong answer for learning (both old and new system)
-                            self._save_wrong_captcha_attempt(required_item, best_idx, button_images)
                             
                             # Record failed attempt for auto-learning
                             try:
@@ -1577,10 +1619,12 @@ class SimpleMMOBot:
             attack_headers = {
                 'X-XSRF-TOKEN': self.csrf_token,
                 'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8',
-                'Accept': '*/*',
+                'Accept': 'application/json',
                 'Origin': 'https://web.simple-mmo.com',
                 'Referer': attack_url,
             }
+            if self.api_token:
+                attack_headers['Authorization'] = f'Bearer {self.api_token}'
             
             # Battle statistics
             total_damage = 0
@@ -1596,7 +1640,6 @@ class SimpleMMOBot:
                 # Prepare attack form data
                 form_data = {
                     '_token': self.csrf_token,
-                    'api_token': self.api_token,
                     'special_attack': 'false'  # Normal attack
                 }
                 
@@ -1623,7 +1666,12 @@ class SimpleMMOBot:
                     self.logger.info(f"Attack #{attack_count}: Damage={damage}, Type={battle_type}")
                     
                     # Check if battle is complete
-                    if battle_type == "success" or "winner" in battle_title.lower():
+                    if (battle_type in ("success", "victory", "won", "win", "defeated")
+                            or "winner" in battle_title.lower()
+                            or "defeated" in battle_title.lower()
+                            or "you won" in battle_title.lower()
+                            or result_data.get("npc_killed") is True
+                            or result_data.get("battle_over") is True):
                         self.logger.info(f"Battle WON after {attack_count} attacks!")
                         
                         # Extract final rewards
@@ -1688,7 +1736,8 @@ class SimpleMMOBot:
             
             # Check for material gathering encounter
             import re
-            material_session_match = re.search(r'material_session_id["\s:]+(\d+)', page_html)
+            # Handles both quoted ("123") and unquoted (123) JSON/JS values
+            material_session_match = re.search(r'material_session_id\D{0,10}?(\d+)', page_html)
             if material_session_match:
                 material_session_id = int(material_session_match.group(1))
                 self.logger.info(f"Detected material gathering opportunity (session_id: {material_session_id})")
@@ -1801,7 +1850,7 @@ class SimpleMMOBot:
                             
                             # Extract material session ID from HTML
                             import re
-                            material_session_match = re.search(r'material_session_id["\s:]+(\d+)', page_html)
+                            material_session_match = re.search(r'material_session_id\D{0,10}?(\d+)', page_html)
                             if material_session_match:
                                 material_session_id = int(material_session_match.group(1))
                                 parsed["material_session_id"] = material_session_id
@@ -1829,7 +1878,23 @@ class SimpleMMOBot:
                         result["npc_battle"] = npc_battle_data
                     if material_gather_data:
                         result["material_gather"] = material_gather_data
-                    
+
+                    # Handle inline NPC encounter returned by the travel API response itself
+                    # (different from a pre-existing redirect — this is a new encounter)
+                    if parsed.get("npc_encounter") and parsed.get("npc_id") and not npc_battle_data:
+                        npc_id = parsed["npc_id"]
+                        self.logger.info(f"Travel step triggered NPC encounter (ID: {npc_id})")
+                        if self.config.get("auto_battle_npcs", True):
+                            self.logger.info("Auto-battling NPC from travel result...")
+                            battle_result = self.attack_npc(npc_id)
+                            if battle_result.get("success"):
+                                result["npc_battle"] = battle_result.get("data", {})
+                                self.logger.info("NPC defeated after travel step.")
+                            else:
+                                self.logger.warning(f"NPC battle after travel failed: {battle_result.get('error')}")
+                        else:
+                            self.logger.info("NPC encounter detected but auto_battle_npcs is disabled — skipping")
+
                     return result
                 except Exception as e:
                     # Response might not be JSON

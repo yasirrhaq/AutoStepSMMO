@@ -48,3 +48,6 @@ Thumbs.db
 *.key
 *.pem
 secrets.json
+
+# Large ML model files — train locally, never commit
+models/

@@ -266,9 +266,9 @@ class AFK24x7Bot:
                             print("- Wrong attempts saved to captcha_learning/ for improvement")
                             print("- Bot will automatically retry if question changes")
                             print("- Checking verification status on next travel...")
-                            print("Waiting 1 minute before continuing...\n")
+                            print("Waiting 30 seconds before continuing...\n")
                             # Shorter wait - might be solved or question may change
-                            for i in range(60, 0, -5):
+                            for i in range(30, 0, -5):
                                 mins, secs = divmod(i, 60)
                                 print(f"\rCooldown: {mins:02d}:{secs:02d}  ", end='', flush=True)
                                 time.sleep(5)

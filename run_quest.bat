@@ -1,0 +1,91 @@
+@echo off
+:: SimpleMMO Auto-Quest Runner
+:: Automatically completes quests in order from lowest to highest level
+
+echo ============================================================
+echo SimpleMMO Auto-Quest Runner
+echo ============================================================
+echo.
+
+:: Check if virtual environment exists
+if not exist ".venv\Scripts\activate.bat" (
+    if not exist "venv\Scripts\activate.bat" (
+        echo Error: Virtual environment not found!
+        echo Please run setup.bat first to install dependencies.
+        echo.
+        pause
+        exit /b 1
+    )
+)
+
+:: Activate virtual environment
+if exist ".venv\Scripts\activate.bat" (
+    call .venv\Scripts\activate.bat
+) else (
+    call venv\Scripts\activate.bat
+)
+
+echo Virtual environment activated
+echo.
+
+:: Check if config.json exists
+if not exist "config.json" (
+    echo Error: config.json not found!
+    echo Please create config.json with your login credentials.
+    echo See config.template.json for an example.
+    echo.
+    pause
+    exit /b 1
+)
+
+:: Quick dependency check
+python -c "import selenium" 2>nul
+if errorlevel 1 (
+    echo.
+    echo ============================================================
+    echo Missing Dependencies Detected!
+    echo ============================================================
+    echo.
+    echo The quest runner requires additional Python packages.
+    echo.
+    echo Please run ONE of the following:
+    echo   1. install_quest_deps.bat    ^(Quick - Quest only^)
+    echo   2. pip install -r requirements.txt  ^(Full - All features^)
+    echo.
+    echo ============================================================
+    echo.
+    pause
+    exit /b 1
+)
+
+echo Starting quest runner...
+echo.
+echo This will automatically:
+echo  - Fetch all available quests
+echo  - Complete quests in order (lowest level first)
+echo  - Move to next quest after completion
+echo  - Continue until all incomplete quests are done
+echo.
+echo Press Ctrl+C to stop at any time
+echo.
+echo ============================================================
+echo.
+
+:: Run the quest runner
+python quest_runner.py
+
+echo.
+echo ============================================================
+echo Quest runner has stopped
+echo ============================================================
+echo.
+
+:: Check the exit code
+if errorlevel 1 (
+    echo.
+    echo Error occurred while running quest bot.
+    echo Check quest_runner.log for details.
+    echo.
+)
+
+pause

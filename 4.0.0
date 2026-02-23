@@ -1,0 +1,14 @@
+Requirement already satisfied: webdriver-manager in f:\research\project\code\bot project\.venv\lib\site-packages (4.0.2)
+Requirement already satisfied: requests in f:\research\project\code\bot project\.venv\lib\site-packages (from webdriver-manager) (2.32.5)
+Collecting python-dotenv (from webdriver-manager)
+  Using cached python_dotenv-1.2.1-py3-none-any.whl.metadata (25 kB)
+Collecting packaging (from webdriver-manager)
+  Using cached packaging-26.0-py3-none-any.whl.metadata (3.3 kB)
+Requirement already satisfied: charset_normalizer<4,>=2 in f:\research\project\code\bot project\.venv\lib\site-packages (from requests->webdriver-manager) (3.4.4)
+Requirement already satisfied: idna<4,>=2.5 in f:\research\project\code\bot project\.venv\lib\site-packages (from requests->webdriver-manager) (3.11)
+Requirement already satisfied: urllib3<3,>=1.21.1 in f:\research\project\code\bot project\.venv\lib\site-packages (from requests->webdriver-manager) (2.6.3)
+Requirement already satisfied: certifi>=2017.4.17 in f:\research\project\code\bot project\.venv\lib\site-packages (from requests->webdriver-manager) (2026.1.4)
+Using cached packaging-26.0-py3-none-any.whl (74 kB)
+Using cached python_dotenv-1.2.1-py3-none-any.whl (21 kB)
+Installing collected packages: python-dotenv, packaging
+Successfully installed packaging-26.0 python-dotenv-1.2.1
