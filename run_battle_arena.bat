@@ -23,8 +23,14 @@ python battle_arena_bot.py
 
 echo.
 echo ============================================================
-echo  Bot stopped. Restarting in 10 seconds...
-echo  Press Ctrl+C NOW to exit completely.
+echo  Bot stopped.
 echo ============================================================
-timeout /t 10 /nobreak >nul
+echo.
+choice /c RC /t 10 /d R /m "Press R to Restart, C to Close (auto-restart in 10s)"
+if errorlevel 2 goto end
 goto start
+
+:end
+echo.
+echo Goodbye!
+echo.

@@ -11,10 +11,19 @@ echo.
 echo ============================================================
 echo.
 
+:start
 C:\Users\BugonPC\AppData\Local\Programs\Python\Python313\python.exe run_24_7.py
 
 echo.
 echo ============================================================
-echo Bot finished
+echo  Bot stopped.
 echo ============================================================
-pause
+echo.
+choice /c RC /t 10 /d R /m "Press R to Restart, C to Close (auto-restart in 10s)"
+if errorlevel 2 goto end
+goto start
+
+:end
+echo.
+echo Goodbye!
+echo.

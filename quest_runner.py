@@ -468,6 +468,10 @@ class QuestRunner(SimpleMMOBot):
         completed_count = 0
         total_gold = 0
         total_exp = 0
+        # Also store on self so KeyboardInterrupt in main() can still print them
+        self._session_completed = 0
+        self._session_gold = 0
+        self._session_exp = 0
         
         while True:
             # Check if we've hit the max quest limit
@@ -509,6 +513,9 @@ class QuestRunner(SimpleMMOBot):
                     total_gold += result.get('gold', 0)
                     total_exp += result.get('exp', 0)
                     quest_remaining -= 1
+                    # Keep self in sync for interrupt-safe stats
+                    self._session_gold = total_gold
+                    self._session_exp = total_exp
                     
                     self.logger.info(f"Quest progress: {quest_remaining} remaining")
                     
@@ -546,6 +553,7 @@ class QuestRunner(SimpleMMOBot):
             # Quest completed — only if inner loop finished normally (not broken by QP wait)
             if quest_remaining == 0:
                 completed_count += 1
+                self._session_completed = completed_count
                 self.logger.info("")
                 self.logger.info("Quest Completed!")
                 self.logger.info(f"Total quests completed this session: {completed_count}")
@@ -628,7 +636,13 @@ def main():
     try:
         bot.auto_quest_loop()
     except KeyboardInterrupt:
-        print("\n\nQuest loop interrupted by user")
+        print("\n\n" + "="*60)
+        print("Quest Runner stopped.")
+        print("="*60)
+        print(f"  Quests completed : {getattr(bot, '_session_completed', 0)}")
+        print(f"  Total EXP        : {getattr(bot, '_session_exp', 0):,}")
+        print(f"  Total Gold       : {getattr(bot, '_session_gold', 0):,}")
+        print("="*60)
     except SystemExit:
         pass  # clean shutdown via signal handler
     except Exception as e:

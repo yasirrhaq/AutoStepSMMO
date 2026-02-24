@@ -72,20 +72,19 @@ echo ============================================================
 echo.
 
 :: Run the quest runner
+:start
 python quest_runner.py
 
 echo.
 echo ============================================================
-echo Quest runner has stopped
+echo  Quest runner stopped.
 echo ============================================================
 echo.
+choice /c RC /t 10 /d R /m "Press R to Restart, C to Close (auto-restart in 10s)"
+if errorlevel 2 goto end
+goto start
 
-:: Check the exit code
-if errorlevel 1 (
-    echo.
-    echo Error occurred while running quest bot.
-    echo Check quest_runner.log for details.
-    echo.
-)
-
-pause
+:end
+echo.
+echo Goodbye!
+echo.
