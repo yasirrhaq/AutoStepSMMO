@@ -8,6 +8,8 @@ import requests
 import time
 import json
 import logging
+import signal
+import sys
 from datetime import datetime
 from typing import Dict, Optional, Any, List
 import random
@@ -234,6 +236,16 @@ class QuestRunner(SimpleMMOBot):
                 return []
             
             self.logger.info(f"Found {len(expeditions)} expeditions from API")
+
+            # Log raw field names from first expedition to help diagnose level field
+            if expeditions:
+                first_exp = expeditions[0]
+                self.logger.debug(f"First expedition raw keys: {list(first_exp.keys())}")
+                level_candidates = {k: v for k, v in first_exp.items() if 'level' in k.lower()}
+                if level_candidates:
+                    self.logger.info(f"Level-related fields in API: {level_candidates}")
+                else:
+                    self.logger.warning("No 'level' fields found in expedition data — level sorting will use ID as tiebreaker")
             
             # Parse expedition data into quest format
             quests = []
@@ -241,7 +253,17 @@ class QuestRunner(SimpleMMOBot):
                 quest_data = {
                     'id': exp.get('id'),
                     'title': exp.get('title', exp.get('name', 'Unknown')),
-                    'level_required': exp.get('level_required', exp.get('min_level', None)),
+                    'level_required': (
+                        exp.get('level_required')
+                        or exp.get('min_level')
+                        or exp.get('level')
+                        or exp.get('required_level')
+                        or exp.get('req_level')
+                        or exp.get('level_req')
+                        or exp.get('min_level_required')
+                        or exp.get('expedition_level')
+                        or None
+                    ),
                     'image_url': exp.get('image_url', ''),
                     'is_completed': exp.get('is_completed', False),
                     'remaining': exp.get('amount_to_complete', 0) - exp.get('amount_completed', exp.get('completed_amount', 0)),
@@ -276,6 +298,7 @@ class QuestRunner(SimpleMMOBot):
         ]
         
         # Sort by level requirement (lowest first) — parse comma-formatted numbers like "1,001"
+        # Secondary sort key: quest id (lower id = older quest = likely lower level)
         def parse_level(q):
             try:
                 val = q.get('level_required')
@@ -285,7 +308,14 @@ class QuestRunner(SimpleMMOBot):
             except (ValueError, TypeError):
                 return 999999
 
-        incomplete.sort(key=parse_level)
+        def sort_key(q):
+            try:
+                quest_id = int(q.get('id', 999999))
+            except (ValueError, TypeError):
+                quest_id = 999999
+            return (parse_level(q), quest_id)
+
+        incomplete.sort(key=sort_key)
         
         self.logger.info(f"Found {len(incomplete)} incomplete quests (sorted by level):")
         for quest in incomplete:
@@ -583,11 +613,24 @@ def main():
     print("[OK] Login successful")
     print()
     
+    # Handle shutdown signals (Ctrl+C, window close, SIGTERM)
+    def _handle_shutdown(sig, frame):
+        print("\n\nShutdown signal received — stopping quest bot cleanly...")
+        sys.exit(0)
+
+    signal.signal(signal.SIGTERM, _handle_shutdown)
+    try:
+        signal.signal(signal.SIGBREAK, _handle_shutdown)  # Windows: Ctrl+Close / window X
+    except (AttributeError, OSError):
+        pass  # SIGBREAK not available on non-Windows
+
     # Start quest loop
     try:
         bot.auto_quest_loop()
     except KeyboardInterrupt:
         print("\n\nQuest loop interrupted by user")
+    except SystemExit:
+        pass  # clean shutdown via signal handler
     except Exception as e:
         print(f"\n\nError: {e}")
         bot.logger.error(f"Fatal error: {e}", exc_info=True)
