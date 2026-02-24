@@ -468,10 +468,14 @@ class QuestRunner(SimpleMMOBot):
         completed_count = 0
         total_gold = 0
         total_exp = 0
+        quest_steps_done = 0
+        quest_progress = {}  # {title: {'done': N, 'total': N, 'remaining': N, 'id': id}}
         # Also store on self so KeyboardInterrupt in main() can still print them
         self._session_completed = 0
         self._session_gold = 0
         self._session_exp = 0
+        self._session_steps = 0
+        self._session_quest_progress = {}
         
         while True:
             # Check if we've hit the max quest limit
@@ -499,7 +503,18 @@ class QuestRunner(SimpleMMOBot):
             # Perform the quest multiple times until completion
             quest_attempts = 0
             quest_remaining = current_quest.get('remaining', 1)
-            
+            quest_title = current_quest['title']
+            quest_id = current_quest.get('id', '?')
+            # Init progress entry for this quest (preserve if already started)
+            if quest_title not in quest_progress:
+                quest_progress[quest_title] = {
+                    'done': 0,
+                    'total': quest_remaining,
+                    'remaining': quest_remaining,
+                    'id': quest_id
+                }
+            self._session_quest_progress = dict(quest_progress)
+
             while quest_remaining > 0:
                 quest_attempts += 1
                 
@@ -513,9 +528,14 @@ class QuestRunner(SimpleMMOBot):
                     total_gold += result.get('gold', 0)
                     total_exp += result.get('exp', 0)
                     quest_remaining -= 1
+                    quest_steps_done += 1
+                    quest_progress[quest_title]['done'] += 1
+                    quest_progress[quest_title]['remaining'] = quest_remaining
                     # Keep self in sync for interrupt-safe stats
                     self._session_gold = total_gold
                     self._session_exp = total_exp
+                    self._session_steps = quest_steps_done
+                    self._session_quest_progress = dict(quest_progress)
                     
                     self.logger.info(f"Quest progress: {quest_remaining} remaining")
                     
@@ -636,12 +656,28 @@ def main():
     try:
         bot.auto_quest_loop()
     except KeyboardInterrupt:
+        _completed  = getattr(bot, '_session_completed', 0)
+        _steps      = getattr(bot, '_session_steps', 0)
+        _exp        = getattr(bot, '_session_exp', 0)
+        _gold       = getattr(bot, '_session_gold', 0)
+        _qp         = getattr(bot, '_session_quest_progress', {})
         print("\n\n" + "="*60)
         print("Quest Runner stopped.")
         print("="*60)
-        print(f"  Quests completed : {getattr(bot, '_session_completed', 0)}")
-        print(f"  Total EXP        : {getattr(bot, '_session_exp', 0):,}")
-        print(f"  Total Gold       : {getattr(bot, '_session_gold', 0):,}")
+        print(f"  Quests fully completed : {_completed}")
+        print(f"  Quest steps done       : {_steps}")
+        print(f"  Total EXP              : {_exp:,}")
+        print(f"  Total Gold             : {_gold:,}")
+        if _qp:
+            print("-"*60)
+            print("  Quest Progress:")
+            for _title, _info in _qp.items():
+                _done      = _info['done']
+                _total     = _info['total']
+                _remaining = _info['remaining']
+                _icon      = "OK" if _remaining == 0 else "->"
+                _status    = "completed" if _remaining == 0 else f"{_done}/{_total} done, {_remaining} left"
+                print(f"   [{_icon}] {_title}: {_status}")
         print("="*60)
     except SystemExit:
         pass  # clean shutdown via signal handler
