@@ -25,7 +25,8 @@ class AFK24x7Bot:
             'total_gold': 0,
             'total_items': 0,
             'npc_battles': 0,
-            'materials_gathered': 0
+            'materials_gathered': 0,
+            'materials_log': {}  # {item_name: total_qty}
         }
         
         # Uptime segment tracking (every 10 travels)
@@ -42,12 +43,16 @@ class AFK24x7Bot:
         self.session_refresh_hours = random.uniform(2, 4)
         self.last_session_refresh = datetime.now()
         
+        # Use UTF-8 console handler so emoji never raises UnicodeEncodeError
+        # on Windows cp1252 terminals.
+        import sys as _sys
+        _utf8_console = open(1, 'w', encoding='utf-8', errors='replace', closefd=False)
         logging.basicConfig(
             level=logging.INFO,
             format='%(asctime)s - %(levelname)s - %(message)s',
             handlers=[
-                logging.FileHandler('afk_24x7.log'),
-                logging.StreamHandler()
+                logging.FileHandler('afk_24x7.log', encoding='utf-8'),
+                logging.StreamHandler(stream=_utf8_console),
             ]
         )
         self.logger = logging.getLogger(__name__)
@@ -91,6 +96,9 @@ class AFK24x7Bot:
         print(f"🤖 CAPTCHAs Solved: {self.stats['captchas_solved']}")
         print(f"⚔️  NPC Battles: {self.stats['npc_battles']}")
         print(f"🔨 Materials Gathered: {self.stats['materials_gathered']}")
+        if self.stats['materials_log']:
+            for _mat_name, _mat_qty in sorted(self.stats['materials_log'].items()):
+                print(f"   • {_mat_name}: x{_mat_qty}")
         print(f"⚠️  Errors Recovered: {self.stats['errors']}")
         print(f"🔄 Bot Restarts: {self.stats['restarts']}")
         
@@ -288,6 +296,12 @@ class AFK24x7Bot:
                             gather_items = material_gather_data.get("items", [])
                             gather_msg   = material_gather_data.get("message", "")
                             
+                            # Track per-item breakdown
+                            for _it in gather_items:
+                                _nm  = _it.get("name", "Material") if isinstance(_it, dict) else str(_it)
+                                _qty = _it.get("quantity", 1)       if isinstance(_it, dict) else 1
+                                self.stats['materials_log'][_nm] = self.stats['materials_log'].get(_nm, 0) + (_qty or 1)
+                            
                             # Add to cumulative stats
                             self.stats['total_exp']   += gather_exp
                             self.stats['total_gold']  += gather_gold
@@ -395,6 +409,12 @@ class AFK24x7Bot:
                                     gather_exp = gather_result.get("exp", 0)
                                     gather_gold = gather_result.get("gold", 0)
                                     gather_items = gather_result.get("items", [])
+                                    
+                                    # Track per-item breakdown
+                                    for _it in gather_items:
+                                        _nm  = _it.get("name", material_name) if isinstance(_it, dict) else str(_it)
+                                        _qty = _it.get("quantity", 1)          if isinstance(_it, dict) else 1
+                                        self.stats['materials_log'][_nm] = self.stats['materials_log'].get(_nm, 0) + (_qty or 1)
                                     
                                     # Add to cumulative stats
                                     self.stats['total_exp'] += gather_exp

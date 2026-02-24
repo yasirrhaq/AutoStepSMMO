@@ -47,13 +47,16 @@ class SimpleMMOBot:
             'Upgrade-Insecure-Requests': '1'
         })
         
-        # Setup logging
+        # Setup logging — use UTF-8 on the console handler so emoji never
+        # raises UnicodeEncodeError on Windows cp1252 terminals.
+        import sys as _sys
+        _utf8_console = open(1, 'w', encoding='utf-8', errors='replace', closefd=False)
         logging.basicConfig(
             level=logging.INFO,
             format='%(asctime)s - %(levelname)s - %(message)s',
             handlers=[
-                logging.FileHandler('simplemmo_bot.log'),
-                logging.StreamHandler()
+                logging.FileHandler('simplemmo_bot.log', encoding='utf-8'),
+                logging.StreamHandler(stream=_utf8_console),
             ]
         )
         self.logger = logging
@@ -439,8 +442,19 @@ class SimpleMMOBot:
                 text = data.get("text", "")
                 results["message"] = text
                 
-                # SimpleMMO uses a 'type' field to signal what happened this step
-                step_type = str(data.get("type", "") or data.get("rewardType", "") or "").lower()
+                # SimpleMMO uses a 'type' field to signal what happened this step.
+                # However 'type' and 'rewardType' are often 'none' even for real encounters.
+                # 'step_type' is a more reliable field that actually says 'npc', 'material', etc.
+                _type_candidates = [
+                    str(data.get("step_type") or ""),
+                    str(data.get("type") or ""),
+                    str(data.get("rewardType") or ""),
+                ]
+                step_type = next(
+                    (t.lower() for t in _type_candidates
+                     if t.lower() not in ("", "none", "normal")),
+                    "none"
+                )
 
                 # ── KEY FIELD: 'value' carries the ID for NPC/material steps ────
                 # e.g. {"type": "npc", "value": 1234}  or  {"type": "material", "value": 5678}
@@ -540,6 +554,13 @@ class SimpleMMOBot:
                     or nested.get("gathering_session_id") or nested.get("session_id")
                     or (raw_value if material_from_type and raw_value else None)
                 )
+                # Also scan the text HTML for 'material_session_id: 12345'
+                # (SMMO embeds it in the Grab button's x-on:click attribute)
+                if not material_session_id and text:
+                    _tsid = _img_re.search(r'material_session_id["\']?\s*[:\s,]+\s*(\d+)', str(text))
+                    if _tsid:
+                        material_session_id = int(_tsid.group(1))
+                        self.logger.info(f"[MATERIAL SESSION from text] id={material_session_id}")
 
                 # Priority 3: text keywords
                 has_material_keywords = False
@@ -571,6 +592,13 @@ class SimpleMMOBot:
                             _img_mat_name = _fname.replace("_", " ").replace("-", " ").title()
                             # raw_value is very likely the gathering session_id for these steps
                             _img_mat_session = raw_value if raw_value else None
+                            # Also scan text HTML directly for embedded session ID
+                            if not _img_mat_session:
+                                _tsid2 = _img_re.search(
+                                    r'material_session_id["\']?\s*[:\s,]+\s*(\d+)', str(text)
+                                )
+                                if _tsid2:
+                                    _img_mat_session = int(_tsid2.group(1))
                             self.logger.info(
                                 f"[MATERIAL IMG DETECT] name={_img_mat_name!r} "
                                 f"candidate_session_id={_img_mat_session!r} src={_src!r}"
@@ -844,26 +872,29 @@ class SimpleMMOBot:
                 break
 
         WB = self.base_url  # https://web.simple-mmo.com
+        AB = "https://api.simple-mmo.com"
 
-        # ── Helper to build URL from 3-pattern match ─────────────────────
+        # ── Helper to build URL from multiple match patterns ─────────────────
         def _find_url(endpoint: str) -> str | None:
             ep_esc = endpoint.replace("/", "\\/")
-            # Pattern 1: plain absolute URL
-            m = _re.search(
-                rf'({re.escape(WB)}/{re.escape(endpoint)}'
-                rf'\?expires=\d+&(?:amp;)?signature=[a-f0-9]+)',
-                html,
-            )
-            if m:
-                return m.group(1).replace("&amp;", "&")
-            # Pattern 2: JSON-escaped
-            m = _re.search(
-                rf'https:\\/\\/web\.simple-mmo\.com\\/{ep_esc}'
-                rf'\?expires=(\d+)(?:\\u0026|&(?:amp;)?)signature=([a-f0-9]+)',
-                html,
-            )
-            if m:
-                return f"{WB}/{endpoint}?expires={m.group(1)}&signature={m.group(2)}"
+            # Pattern 1: plain absolute URL (web or api domain)
+            for base in (WB, AB):
+                m = _re.search(
+                    rf'({re.escape(base)}/{re.escape(endpoint)}'
+                    rf'\?expires=\d+&(?:amp;)?signature=[a-f0-9]+)',
+                    html,
+                )
+                if m:
+                    return m.group(1).replace("&amp;", "&")
+            # Pattern 2: JSON-escaped single backslash (web or api)
+            for base_esc in ("web\\.simple-mmo\\.com", "api\\.simple-mmo\\.com"):
+                m = _re.search(
+                    rf'https:\\/\\/{base_esc}\\/{ep_esc}'
+                    rf'\?expires=(\d+)(?:\\u0026|&(?:amp;)?)signature=([a-f0-9]+)',
+                    html,
+                )
+                if m:
+                    return f"{WB}/{endpoint}?expires={m.group(1)}&signature={m.group(2)}"
             # Pattern 3: relative path with query string
             seg = endpoint.split("/")[-1]  # e.g. "gather" or "information"
             m = _re.search(
@@ -872,12 +903,32 @@ class SimpleMMOBot:
             )
             if m:
                 return f"{WB}/api/gathering/material/{seg}?expires={m.group(1)}&signature={m.group(2)}"
+            # Pattern 4: Livewire wire:snapshot double-encoded (\\\\/ = \\\/ in HTML)
+            m = _re.search(
+                rf'gathering\\\\/material\\\\/{_re.escape(seg)}'
+                rf'[^?"\']*\?expires=(\d+)(?:\\\\u0026|&)signature=([a-f0-9]+)',
+                html,
+            )
+            if m:
+                return f"{WB}/api/gathering/material/{seg}?expires={m.group(1)}&signature={m.group(2)}"
+            # Pattern 5: broad fallback — any URL fragment containing the segment + expires + signature
+            m = _re.search(
+                rf'["\']([^"\']*gathering[/\\\\]+material[/\\\\]+{_re.escape(seg)}'
+                rf'[^"\']*expires=(\d+)[^"\']*signature=([a-f0-9]+)[^"\']*)["\']',
+                html,
+            )
+            if m:
+                raw = m.group(1).replace("\\/", "/").replace("\\u0026", "&").replace("\\\\", "")
+                if not raw.startswith("http"):
+                    raw = f"{WB}/{raw.lstrip('/')}"
+                return raw
             return None
 
         result["info_url"]   = _find_url("api/gathering/material/information")
         result["gather_url"] = _find_url("api/gathering/material/gather")
 
-        self.logger.info(
+        _log_fn = self.logger.info if (result["session_id"] or result["info_url"] or result["gather_url"]) else self.logger.debug
+        _log_fn(
             f"[Gathering URLs] session_id={result['session_id']}  "
             f"info={'found' if result['info_url'] else 'missing'}  "
             f"gather={'found' if result['gather_url'] else 'missing'}"
@@ -947,9 +998,9 @@ class SimpleMMOBot:
             'battle-npc', 'fight-npc', 'npc-encounter',
         ]
         if any(ind in html for ind in npc_indicators):
-            self.logger.info(
+            self.logger.debug(
                 f"[NPC detect] Page has NPC-related content but ID not extracted "
-                f"— snippet: {html[:500]!r}"
+                f"-- snippet: {html[:500]!r}"
             )
         return None
 
@@ -1014,11 +1065,12 @@ class SimpleMMOBot:
                 material_session_id = g["session_id"]
 
             api_headers = {
-                "X-XSRF-TOKEN": self.csrf_token,
-                "Content-Type": "application/json",
+                "X-XSRF-TOKEN":  self.csrf_token,
+                "Content-Type":  "application/json",
                 "Accept":        "application/json",
                 "Origin":        self.base_url,
                 "Referer":       f"{self.base_url}/travel",
+                "Authorization": f"Bearer {self.api_token}" if self.api_token else "",
             }
 
             # ── Step 3: information endpoint ──────────────────────────────
@@ -1102,11 +1154,11 @@ class SimpleMMOBot:
                         _fb_r = self.session.post(
                             _fb_url,
                             headers=api_headers,
-                            json={"quantity": quantity or 1, "id": material_session_id},
+                            json={"material_session_id": material_session_id, "quantity": quantity or 1, "id": material_session_id},
                             timeout=10,
                         )
                         self.logger.info(
-                            f"Fallback gather {_fb_url!r} → HTTP {_fb_r.status_code} "
+                            f"Fallback gather {_fb_url!r} -> HTTP {_fb_r.status_code} "
                             f"body={_fb_r.text[:200]!r}"
                         )
                         if _fb_r.status_code == 200:
@@ -1141,7 +1193,7 @@ class SimpleMMOBot:
                 gr = self.session.post(
                     gather_url,
                     headers=api_headers,
-                    json={"quantity": quantity, "id": material_session_id},
+                    json={"material_session_id": material_session_id, "quantity": quantity, "id": material_session_id},
                     timeout=15,
                 )
 
@@ -1424,19 +1476,22 @@ class SimpleMMOBot:
                 padding=True
             )
             
-            # Get model predictions
-            outputs = model(**inputs)
-            logits_per_image = outputs.logits_per_image
-            probs = logits_per_image.softmax(dim=1)
+            # Get model predictions using the correct ranking direction:
+            # softmax across images (dim=0) so each image competes against the others
+            # per text prompt, then average win-probability across text variations.
+            with torch.no_grad():
+                outputs = model(**inputs)
+                logits_per_image = outputs.logits_per_image  # [num_images, num_texts]
+                probs_per_text   = logits_per_image.softmax(dim=0)  # images compete per text
+                avg_probs        = probs_per_text.mean(dim=1)       # [num_images]
             
             # Find best match
             scores = []
             for img_idx in range(len(button_images)):
-                img_scores = probs[img_idx].tolist()
-                max_score = max(img_scores) * 100
-                scores.append((img_idx, max_score))
-                print(f"  Button {img_idx + 1}: AI confidence = {max_score:.0f}%")
-                self.logger.info(f"  Button {img_idx + 1}: AI confidence = {max_score:.0f}%")
+                score = int(float(avg_probs[img_idx]) * 100)
+                scores.append((img_idx, score))
+                print(f"  Button {img_idx + 1}: AI confidence = {score}%")
+                self.logger.info(f"  Button {img_idx + 1}: AI confidence = {score}%")
             
             scores.sort(key=lambda x: x[1], reverse=True)
             best_idx = scores[0][0] + 1
@@ -1456,7 +1511,7 @@ class SimpleMMOBot:
             
             # Click the best match
             best_match = button_images[best_idx - 1]['button']
-            print(f"→ Clicking button {best_idx}...")
+            print(f"-> Clicking button {best_idx}...")
             best_match.click()
             time.sleep(4)
             
@@ -1732,23 +1787,21 @@ class SimpleMMOBot:
                 
                 self.logger.info(f"Successfully loaded {len(button_images)}/{len(buttons)} button images")
                 
-                # Prepare text candidates - try variations with better prompts
+                # Prepare text candidates — positive prompts only.
+                # CLIP does NOT understand negation, so "NOT a X" is harmful.
                 text_variations = [
+                    required_item,
+                    required_item.lower(),
+                    required_item.title(),
                     f"a {required_item.lower()}",
+                    f"an {required_item.lower()}",
                     f"the {required_item.lower()}",
                     f"a picture of a {required_item.lower()}",
                     f"an icon showing a {required_item.lower()}",
                     f"a drawing of a {required_item.lower()}",
                     f"a cartoon {required_item.lower()}",
-                    f"{required_item.lower()} item",
-                    f"{required_item.lower()} object"
+                    f"{required_item.lower()} object",
                 ]
-                
-                # Also add negative examples to improve discrimination
-                common_items = ["ghost", "banana", "hat", "sword", "shield", "potion", "key", "coin", "gem", "book"]
-                negative_items = [item for item in common_items if item.lower() != required_item.lower()][:3]
-                for neg_item in negative_items:
-                    text_variations.append(f"NOT a {neg_item}")
                 
                 print(f"  Using {len(text_variations)} text variations for matching")
                 self.logger.info(f"Using {len(text_variations)} text variations")
@@ -1767,9 +1820,13 @@ class SimpleMMOBot:
                 with torch.no_grad():
                     outputs = model(**inputs)
                     logits_per_image = outputs.logits_per_image  # Shape: [num_images, num_texts]
-                    probs = logits_per_image.softmax(dim=1)  # Normalize across text variations
+                    # softmax across images (dim=0): for each text prompt, images compete with each other.
+                    # This is the correct direction — mirrors how the auto-labeler works.
+                    probs_per_text = logits_per_image.softmax(dim=0)  # [num_images, num_texts]
+                    # Average win-probability across all text variations for each image.
+                    avg_probs = probs_per_text.mean(dim=1)  # [num_images]
                 
-                # Find best match for each image (max score across all text variations)
+                # Build per-button scores from averaged win-probabilities
                 button_scores = []
                 best_match = None
                 best_score = 0
@@ -1777,9 +1834,7 @@ class SimpleMMOBot:
                 
                 for i, img_data in enumerate(button_images):
                     idx = img_data['idx']
-                    # Get max probability across all text variations for this image
-                    max_prob = probs[i].max().item()
-                    score = int(max_prob * 100)
+                    score = int(float(avg_probs[i]) * 100)
                     
                     button_scores.append({'idx': idx + 1, 'score': score, 'button': img_data['button']})
                     
@@ -1804,15 +1859,17 @@ class SimpleMMOBot:
                 self.logger.info(f"Best match: Button {best_idx} with {best_score}% confidence")
 
                 # Log confidence warnings
-                if best_score < 60:
+                # With dim=0 softmax, random baseline = 100/4 = 25%.
+                # A confident correct pick should be >=40%.
+                if best_score < 40:
                     print(f"⚠ WARNING: Low AI confidence ({best_score}%) - might be wrong!")
                     self.logger.warning(f"Low confidence: {best_score}%")
-
+                
                 if margin < 8:
                     self.logger.warning(f"Small margin: {margin}%")
 
                 if best_match:
-                    print(f"→ Clicking button {best_idx} (best guess)...")
+                    print(f"-> Clicking button {best_idx} (best guess)...")
                     self.logger.info(f"Clicking button {best_idx} with {best_score}% confidence and {margin}% margin...")
                     best_match.click()
                     
@@ -1970,7 +2027,7 @@ class SimpleMMOBot:
                             try:
                                 new_required_item = self._extract_required_item(final_page)
                                 if new_required_item and new_required_item.lower() != required_item.lower():
-                                    self.logger.info(f"CAPTCHA question changed: '{required_item}' → '{new_required_item}'")
+                                    self.logger.info(f"CAPTCHA question changed: '{required_item}' -> '{new_required_item}'")
                                     print(f"\n🔄 CAPTCHA question changed!")
                                     print(f"  Previous: {required_item}")
                                     print(f"  New: {new_required_item}")
@@ -2387,6 +2444,7 @@ class SimpleMMOBot:
         # First check if we're currently in an NPC battle or material gathering
         npc_battle_data = None
         material_gather_data = None
+        page_html = None  # pre-travel page; also used as fallback HTML for gathering
         
         try:
             page_html = self._fetch_html(f"{self.base_url}/travel")
@@ -2423,7 +2481,7 @@ class SimpleMMOBot:
             
             # ── Pre-travel: detect pending NPC battle ──────────────────────────
             # Use the comprehensive extractor (URL redirect + all HTML patterns)
-            npc_id_pretrav = self._extract_npc_from_page(page_html, travel_page.url)
+            npc_id_pretrav = self._extract_npc_from_page(page_html, f"{self.base_url}/travel")
 
             if npc_id_pretrav:
                 npc_id = npc_id_pretrav
@@ -2518,7 +2576,10 @@ class SimpleMMOBot:
                             parsed["material_encounter"] = False
                             ph = None
                     else:
-                        ph = None  # no re-fetch needed
+                        # Session ID came from travel API — no re-fetch needed.
+                        # Reuse the pre-travel page HTML so salvage_material has the
+                        # gathering modal's signed URLs without an extra network call.
+                        ph = page_html
 
                     # ── Gather material if we now have a session ID ──────────────
                     if parsed.get("material_encounter") and parsed.get("material_session_id") and not material_gather_data:
@@ -2529,8 +2590,15 @@ class SimpleMMOBot:
                                 f"Gathering material (session={msid}"
                                 f"{', pre-url='+repr(_pre_gather_url) if _pre_gather_url else ''})"
                             )
-                            # Pass refetched page HTML so signed URLs don't need another fetch
-                            gr = self.salvage_material(msid, page_html=ph, gather_url=_pre_gather_url)
+                            # Pass refetched/pre-travel page HTML so signed URLs don't need another fetch
+                            _html_for_gather = ph  # may be pre-travel page or a fresh re-fetch
+                            if _html_for_gather and "gathering" in _html_for_gather:
+                                import re as _redebug
+                                _gat_m = _redebug.search(r'.{0,300}gathering.{0,300}', _html_for_gather, _redebug.IGNORECASE)
+                                self.logger.debug(f"[GATHER HTML SNIPPET] {_gat_m.group(0)!r}" if _gat_m else "[GATHER HTML SNIPPET] no match")
+                                _exp_m = _redebug.search(r'.{0,200}expires.{0,200}', _html_for_gather, _redebug.IGNORECASE)
+                                self.logger.debug(f"[EXPIRES SNIPPET] {_exp_m.group(0)!r}" if _exp_m else "[EXPIRES SNIPPET] not found in page")
+                            gr = self.salvage_material(msid, page_html=_html_for_gather, gather_url=_pre_gather_url)
                             if gr.get("success"):
                                 material_gather_data = gr
                                 self.logger.info("Material gathered after travel step.")
@@ -2616,7 +2684,7 @@ class SimpleMMOBot:
 
                             # NPC check (if not already battled this step)
                             if not npc_battle_data and self.config.get("auto_battle_npcs", True):
-                                pt_npc_id = self._extract_npc_from_page(pt_html, pt.url)
+                                pt_npc_id = self._extract_npc_from_page(pt_html, f"{self.base_url}/travel")
                                 if pt_npc_id:
                                     self.logger.info(
                                         f"Post-travel: NPC encounter found (ID={pt_npc_id})"
