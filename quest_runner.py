@@ -11,7 +11,7 @@ import logging
 import signal
 import sys
 from datetime import datetime
-from typing import Dict, Optional, Any, List
+from typing import Dict, Optional, Any, List, Tuple
 import random
 import re
 from bs4 import BeautifulSoup
@@ -269,6 +269,7 @@ class QuestRunner(SimpleMMOBot):
                     'remaining': exp.get('amount_to_complete', 0) - exp.get('amount_completed', exp.get('completed_amount', 0)),
                     'experience': exp.get('experience', 0),
                     'gold': exp.get('gold', 0),
+                    'success_chance': int(exp.get('success_chance', exp.get('chance', exp.get('success_rate', 100))) or 100),
                     'perform_url': perform_url,
                     'api_endpoints': endpoints
                 }
@@ -450,12 +451,21 @@ class QuestRunner(SimpleMMOBot):
             self.logger.error(f"Failed to parse quest response: {e}")
             return {"success": False, "error": "Invalid JSON response"}
     
-    def auto_quest_loop(self, max_quests: int = None):
+    def auto_quest_loop(self, max_quests: int = None,
+                         priority_quests: List[Tuple[Dict[str, Any], int]] = None,
+                         direction: str = 'lowest'):
         """
-        Automatically complete quests in order
-        
+        Automatically complete quests in order.
+
         Args:
-            max_quests: Maximum number of quests to complete (None = unlimited)
+            max_quests:      Maximum number of quests to fully complete (None = unlimited)
+            priority_quests: Optional list of (quest_dict, times) to run sequentially
+                             before falling into the normal lowest-level loop
+            direction:       'lowest' (default) or 'highest' — controls which end of the
+                             incomplete list the normal loop starts from. In both cases
+                             the bot skips quests with <100% success rate until it finds
+                             one that is 100%, only falling back to a non-100% quest if
+                             none exist at all.
         """
         if not self.logged_in:
             self.logger.error("Not logged in - cannot run quest loop")
@@ -464,7 +474,7 @@ class QuestRunner(SimpleMMOBot):
         self.logger.info("=" * 60)
         self.logger.info("Starting Auto-Quest Loop")
         self.logger.info("=" * 60)
-        
+
         completed_count = 0
         total_gold = 0
         total_exp = 0
@@ -476,7 +486,68 @@ class QuestRunner(SimpleMMOBot):
         self._session_exp = 0
         self._session_steps = 0
         self._session_quest_progress = {}
-        
+
+        # ── Priority quests: run each N times before the normal loop ─────────
+        for _pq_num, (_pquest, _ptimes) in enumerate(priority_quests or [], start=1):
+            if _ptimes <= 0:
+                continue
+            _ptitle = _pquest['title']
+            _total_pq = len(priority_quests)
+            print("\n" + "="*60)
+            print(f"  Priority Quest {_pq_num}/{_total_pq}: {_ptitle}")
+            print(f"  Running {_ptimes} time(s)")
+            print("="*60)
+            if _ptitle not in quest_progress:
+                quest_progress[_ptitle] = {
+                    'done': 0, 'total': _ptimes,
+                    'remaining': _ptimes, 'id': _pquest.get('id')
+                }
+            self._session_quest_progress = dict(quest_progress)
+            _p_done = 0
+            while _p_done < _ptimes:
+                result = self.perform_quest(_pquest)
+                if result.get('success'):
+                    _p_done += 1
+                    total_gold += result.get('gold', 0)
+                    total_exp += result.get('exp', 0)
+                    quest_steps_done += 1
+                    quest_progress[_ptitle]['done'] = quest_progress[_ptitle].get('done', 0) + 1
+                    quest_progress[_ptitle]['remaining'] = _ptimes - _p_done
+                    self._session_gold = total_gold
+                    self._session_exp = total_exp
+                    self._session_steps = quest_steps_done
+                    self._session_quest_progress = dict(quest_progress)
+                    self.logger.info(f"Priority quest {_pq_num}/{_total_pq} progress: {_p_done}/{_ptimes}")
+                    if _p_done < _ptimes:
+                        delay = self._get_delay(self.quest_delay_steps_min, self.quest_delay_steps_max)
+                        self.logger.info(f"Waiting {delay:.1f}s...")
+                        time.sleep(delay)
+                else:
+                    error = result.get('error', 'Unknown error')
+                    if result.get('should_stop'):
+                        self.logger.warning("Out of quest points — waiting for regen...")
+                        self.wait_for_quest_points()
+                    elif 'session expired' in error.lower():
+                        self.logger.error("Session expired — stopping.")
+                        return
+                    elif 'rate limit' in error.lower() or error == 'Cooldown':
+                        time.sleep(result.get('retry_after', 30))
+                    else:
+                        time.sleep(self.quest_error_retry_delay)
+            print("\n" + "="*60)
+            print(f"  Priority Quest {_pq_num}/{_total_pq} Done: {_ptitle}")
+            print(f"  Performed {_p_done} time(s)")
+            print(f"  Session EXP so far : {total_exp:,}")
+            print(f"  Session Gold so far: {total_gold:,}")
+            print("="*60)
+            if _pq_num < _total_pq:
+                delay = self._get_delay(self.quest_delay_quests_min, self.quest_delay_quests_max)
+                print(f"  Next priority quest in {delay:.1f}s...\n")
+                time.sleep(delay)
+            else:
+                print("  All priority quests done — resuming normal quest loop...\n")
+
+        # ── Normal quest loop ────────────────────────────────────────────────
         while True:
             # Check if we've hit the max quest limit
             if max_quests and completed_count >= max_quests:
@@ -485,13 +556,26 @@ class QuestRunner(SimpleMMOBot):
             
             # Get incomplete quests
             incomplete_quests = self.get_incomplete_quests()
-            
+
             if not incomplete_quests:
                 self.logger.info("No more incomplete quests available!")
                 break
-            
-            # Get the lowest level incomplete quest
-            current_quest = incomplete_quests[0]
+
+            # Pick based on direction, preferring quests with 100% success rate
+            if direction == 'highest':
+                search_order = list(reversed(incomplete_quests))
+            else:
+                search_order = list(incomplete_quests)
+            current_quest = next(
+                (q for q in search_order if q.get('success_chance', 100) >= 100),
+                search_order[0]  # fallback: first in chosen direction if none are 100%
+            )
+            _sc = current_quest.get('success_chance', 100)
+            if _sc < 100:
+                self.logger.warning(
+                    f"No 100% success quest found in '{direction}' direction — "
+                    f"picking '{current_quest['title']}' ({_sc}% chance) as fallback"
+                )
             
             self.logger.info("")
             self.logger.info("=" * 60)
@@ -649,8 +733,85 @@ def main():
     
     print("[OK] Login successful")
     print()
-    
-    # Handle shutdown signals (Ctrl+C, window close, SIGTERM)
+
+    # ── Interactive quest picker ─────────────────────────────────────────────
+    priority_quests: List[Tuple[Dict[str, Any], int]] = []
+
+    print("Fetching quest list...")
+    incomplete = bot.get_incomplete_quests()
+
+    if incomplete:
+        print()
+        print("=" * 60)
+        print("  Available Incomplete Quests")
+        print("=" * 60)
+        for i, q in enumerate(incomplete, 1):
+            lvl = q.get('level_required', '?')
+            rem = q.get('remaining', '?')
+            sc  = q.get('success_chance', 100)
+            sc_tag = f"{sc}%" if sc < 100 else "100%"
+            sc_label = f"  \033[91m[{sc_tag}]\033[0m" if sc < 100 else f"  \033[92m[{sc_tag}]\033[0m"
+            print(f"  {i:>3}. [Lvl {lvl:>6}] {q['title']}  (remaining: {rem}){sc_label}")
+        print("=" * 60)
+        print()
+        print("  You can queue multiple quests to run in order before the normal loop.")
+        print("  For each slot: type a NUMBER to pick a quest, or press Enter to stop")
+        print("  adding quests and start the bot.")
+        print()
+
+        slot = 1
+        while True:
+            choice = input(f"  Quest #{slot} (Enter to start bot): ").strip()
+            if not choice:
+                break
+            try:
+                idx = int(choice) - 1
+                if 0 <= idx < len(incomplete):
+                    picked = incomplete[idx]
+                    times_str = input(
+                        f"  How many times to run '{picked['title']}'? "
+                        f"(remaining: {picked.get('remaining', '?')}, Enter = 1): "
+                    ).strip()
+                    times = int(times_str) if times_str.isdigit() and int(times_str) > 0 else 1
+                    priority_quests.append((picked, times))
+                    print(f"  → Added: '{picked['title']}' x{times}")
+                    print()
+                    slot += 1
+                else:
+                    print(f"  Invalid number, try 1-{len(incomplete)}.")
+            except ValueError:
+                print("  Please enter a valid number.")
+
+        if priority_quests:
+            print()
+            print("  Queue:")
+            for n, (q, t) in enumerate(priority_quests, 1):
+                sc = q.get('success_chance', 100)
+                sc_str = f" ({sc}% success)" if sc < 100 else ""
+                print(f"    {n}. {q['title']}  x{t}{sc_str}")
+            print("  After the queue finishes, the bot will continue with the")
+            print("  auto-loop using the direction you choose below.")
+            print()
+        else:
+            print("  No quests queued.\n")
+
+        # ── Direction prompt ──────────────────────────────────────────────────
+        print("  Normal loop direction (after queue, or immediately if no queue):")
+        print("    [L] Lowest level first — skips quests below 100% success rate")
+        print("    [H] Highest level first — skips quests below 100% success rate,")
+        print("        works downward looking for the highest 100% quest")
+        print()
+        dir_choice = input("  Direction (L/H, Enter = lowest): ").strip().lower()
+        direction = 'highest' if dir_choice == 'h' else 'lowest'
+        if direction == 'highest':
+            print("  \u2192 Highest-level 100% quests first, working downward.\n")
+        else:
+            print("  \u2192 Lowest-level quests first (default).\n")
+    else:
+        print("No incomplete quests found.")
+        return
+
+    # ── Signal handlers ──────────────────────────────────────────────────────
     def _handle_shutdown(sig, frame):
         print("\n\nShutdown signal received — stopping quest bot cleanly...")
         sys.exit(0)
@@ -663,7 +824,7 @@ def main():
 
     # Start quest loop
     try:
-        bot.auto_quest_loop()
+        bot.auto_quest_loop(priority_quests=priority_quests, direction=direction)
     except KeyboardInterrupt:
         _completed  = getattr(bot, '_session_completed', 0)
         _steps      = getattr(bot, '_session_steps', 0)
