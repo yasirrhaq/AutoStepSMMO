@@ -21,8 +21,8 @@ Double-click any `.bat` file to launch. When the bot stops, the window will ask:
  Press Enter to restart, or C to close.
 ```
 
-- **Enter** - restarts the bot automatically
-- **C** - closes the window
+- **Enter**  restarts the bot automatically
+- **C**  closes the window
 
 ---
 
@@ -30,11 +30,11 @@ Double-click any `.bat` file to launch. When the bot stops, the window will ask:
 
 ### 24/7 AFK Travel Bot (`run_24_7.py`)
 
-- Walks travel steps continuously with human-like random delays (configurable, default 15-18 s)
+- Walks travel steps continuously with human-like random delays (configurable, default 1518 s)
 - Auto-battles NPCs encountered during travel using signed-URL attack flow
 - Auto-gathers materials using signed-URL extraction from page HTML
 - Item drop display with rarity parsing: Common, Uncommon, Rare, Elite, Epic, Legendary, Mythic, Celestial
-- Random breaks every 50-100 travels; automatic session refresh every 2-4 hours
+- Random breaks every 50100 travels; automatic session refresh every 24 hours
 - Per-travel live stats: EXP, Gold, cooldown countdown
 - Summary stats every 10 travels: EXP/hour, Gold/hour, travels/hour
 - Per-material breakdown in session stats (e.g. Iron Ore x12, Leather x5)
@@ -53,15 +53,27 @@ Double-click any `.bat` file to launch. When the bot stops, the window will ask:
 
 ### Quest Runner Bot (`quest_runner.py`)
 
-- Fetches all available quests and completes them lowest-level first
+- Fetches all available quests with level requirements, remaining steps, and **success rate**
 - Extracts signed quest API endpoints from page HTML on each run
 - Tracks quest points and polls for regeneration when exhausted
 - Per-quest step tracking: knows how many steps done vs. remaining per quest
+
+**Interactive startup prompt:**
+
+1. Displays the full list of incomplete quests with level, remaining steps, and success rate (colour-coded green = 100%, red = <100%)
+2. **Multi-quest queue**  add as many quests as you want to run in order before the normal loop:
+   - Type the list number to pick a quest, enter how many times to run it, repeat
+   - Press Enter on an empty slot to stop adding and proceed
+3. **Direction choice** for the automatic loop after the queue:
+   - `L` (default)  lowest level first
+   - `H`  highest level first
+   - In both modes the bot **skips quests below 100% success rate**, scanning toward the chosen end until it finds a 100% quest; falls back to the nearest available quest only if none are 100%
+
 - Clean Ctrl+C stop with detailed summary:
   - Quests fully completed
-  - Total quest steps performed
+  - Total attempts performed
   - Total EXP and Gold earned
-  - Per-quest progress breakdown (steps done / total, remaining)
+  - Per-quest progress breakdown (attempts done / total, remaining)
 - All delays configurable via the `quest` block in `config.json`
 
 ### CAPTCHA Auto-Solve System
@@ -209,6 +221,47 @@ Bot stopped gracefully. Goodbye!
   Next fight in 5.1s...
 ```
 
+### Quest Runner - Startup Prompt
+
+```
+============================================================
+  Available Incomplete Quests
+============================================================
+    1. [Lvl     50] Investigate the missing sheep  (remaining: 10)   [100%]
+    2. [Lvl    100] Read a scroll about Mahol       (remaining: 212)  [100%]
+    3. [Lvl    200] The Cursed Dungeon              (remaining: 50)   [60%]
+    4. [Lvl    300] Dragon's Lair                   (remaining: 30)   [100%]
+============================================================
+
+  You can queue multiple quests to run in order before the normal loop.
+  For each slot: type a NUMBER to pick a quest, or press Enter to stop
+  adding quests and start the bot.
+
+  Quest #1 (Enter to start bot): 2
+  How many times to run 'Read a scroll about Mahol'? (remaining: 212, Enter = 1): 50
+  -> Added: 'Read a scroll about Mahol' x50
+
+  Quest #2 (Enter to start bot): 1
+  How many times to run 'Investigate the missing sheep'? (remaining: 10, Enter = 1): 10
+  -> Added: 'Investigate the missing sheep' x10
+
+  Quest #3 (Enter to start bot):
+
+  Queue:
+    1. Read a scroll about Mahol  x50
+    2. Investigate the missing sheep  x10
+  After the queue finishes, the bot will continue with the
+  auto-loop using the direction you choose below.
+
+  Normal loop direction (after queue, or immediately if no queue):
+    [L] Lowest level first - skips quests below 100% success rate
+    [H] Highest level first - skips quests below 100% success rate,
+        works downward looking for the highest 100% quest
+
+  Direction (L/H, Enter = lowest): h
+  -> Highest-level 100% quests first, working downward.
+```
+
 ### Quest Runner - Ctrl+C Summary
 
 ```
@@ -216,14 +269,14 @@ Bot stopped gracefully. Goodbye!
 Quest Runner stopped.
 ============================================================
   Quests fully completed : 2
-  Quest steps done       : 67
+  Total attempts         : 67
   Total EXP              : 345,210
   Total Gold             : 12,430
 ------------------------------------------------------------
   Quest Progress:
+   [OK] Read a scroll about Mahol: 50/50 done, completed
    [OK] Investigate the missing sheep: 10/10 done, completed
-   [OK] The case of the missing ring: 53/53 done, completed
-   [->] Play SimpleMMO: 4/101 done, 97 left
+   [->] Dragon's Lair: 7/30 done, 23 left
 ============================================================
 ```
 
