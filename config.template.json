@@ -30,12 +30,10 @@
   "_auto_training_note": "Set auto_captcha_training=false to stop model retraining until you manually review captcha_learning/failures/",
   "auto_captcha_training": false,
 
-  "_npc_settings": "Automatically battle NPCs encountered during travel",
-  "auto_battle_npcs": true,
-
-  "_gathering_settings": "Automatically gather materials and event items",
-  "auto_gather_materials": true,
-
+  "_captcha_model_strategy_info": "CAPTCHA Model Strategy: base_only (base CLIP), finetuned_only (your trained model), smart_fallback (auto-switch between models)",
+  "captcha_model_strategy": "smart_fallback",
+  "_captcha_failure_threshold_info": "After N consecutive failures with one model, switch to the other model",
+  "captcha_failure_threshold": 5,
   "use_finetuned_captcha": false,
 
   "_warnings": "Only use auto_solve_captcha on test accounts!",
