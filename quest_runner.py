@@ -574,29 +574,38 @@ class QuestRunner(SimpleMMOBot):
             if quest_remaining == 0:
                 completed_count += 1
                 self._session_completed = completed_count
-                self.logger.info("")
-                self.logger.info("Quest Completed!")
-                self.logger.info(f"Total quests completed this session: {completed_count}")
-                self.logger.info(f"Total gold earned: {total_gold}")
-                self.logger.info(f"Total EXP earned: {total_exp}")
-                
+                _q_steps = quest_progress[quest_title]['done']
+                print("\n" + "="*60)
+                print(f"  Quest Completed: {quest_title}")
+                print("="*60)
+                print(f"  Attempts (this quest)   : {_q_steps}")
+                print(f"  Quests completed        : {completed_count}")
+                print(f"  Session EXP so far      : {total_exp:,}")
+                print(f"  Session Gold so far     : {total_gold:,}")
+                print("="*60)
+
                 # Wait before moving to next quest
                 delay = self._get_delay(
                     self.quest_delay_quests_min,
                     self.quest_delay_quests_max
                 )
-                self.logger.info(f"\nWaiting {delay:.1f}s before next quest...")
+                print(f"  Moving to next quest in {delay:.1f}s...\n")
                 time.sleep(delay)
         
         # Final summary
-        self.logger.info("")
-        self.logger.info("=" * 60)
-        self.logger.info("Quest Session Complete!")
-        self.logger.info("=" * 60)
-        self.logger.info(f"Total quests completed: {completed_count}")
-        self.logger.info(f"Total gold earned: {total_gold}")
-        self.logger.info(f"Total EXP earned: {total_exp}")
-        self.logger.info("=" * 60)
+        print("\n" + "="*60)
+        print("  Quest Session Complete!")
+        print("="*60)
+        print(f"  Quests completed : {completed_count}")
+        print(f"  Total EXP        : {total_exp:,}")
+        print(f"  Total Gold       : {total_gold:,}")
+        if quest_progress:
+            print("-"*60)
+            for _title, _info in quest_progress.items():
+                _icon = "OK" if _info['remaining'] == 0 else "->"
+                _status = "completed" if _info['remaining'] == 0 else f"{_info['done']}/{_info['total']} done, {_info['remaining']} left"
+                print(f"   [{_icon}] {_title}: {_status}")
+        print("="*60)
 
 
 def main():
@@ -665,7 +674,7 @@ def main():
         print("Quest Runner stopped.")
         print("="*60)
         print(f"  Quests fully completed : {_completed}")
-        print(f"  Quest steps done       : {_steps}")
+        print(f"  Total attempts         : {_steps}")
         print(f"  Total EXP              : {_exp:,}")
         print(f"  Total Gold             : {_gold:,}")
         if _qp:
