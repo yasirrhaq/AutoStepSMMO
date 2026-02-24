@@ -466,11 +466,12 @@ class SimpleMMOBot:
                 # Show full text when it contains HTML (NPC/material encounters embed HTML in text field)
                 _text_has_html = "<img" in str(text) or "<span" in str(text) or "<div" in str(text)
                 _txt_preview = str(text) if (step_type == "item" or _text_has_html) else str(text)[:120]
-                self.logger.info(f"[RAW TRAVEL] type={step_type!r} value={raw_value!r} text={_txt_preview!r}")
-                # Full JSON for unusual types, debug mode, OR when text looks like an encounter (contains HTML)
                 _text_is_img = str(text).strip().startswith("<img")
-                if self.config.get("debug_mode", False) or step_type not in ("", "gold", "exp", "experience", "none", "normal", "item") or _text_has_html:
-                    self.logger.info(f"[RAW TRAVEL FULL] {_json.dumps(data)}")
+                if self.config.get("debug_mode", False):
+                    self.logger.info(f"[RAW TRAVEL] type={step_type!r} value={raw_value!r} text={_txt_preview!r}")
+                    # Full JSON only in debug mode
+                    if step_type not in ("", "gold", "exp", "experience", "none", "normal", "item") or _text_has_html:
+                        self.logger.info(f"[RAW TRAVEL FULL] {_json.dumps(data)}")
 
                 # Check for CAPTCHA challenge
                 if "i-am-not-a-bot" in text.lower() or "hold up" in text.lower():
