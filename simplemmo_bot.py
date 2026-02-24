@@ -78,6 +78,13 @@ class SimpleMMOBot:
         except Exception as e:
             self.logger.warning(f"Could not configure Tesseract: {e}")
         
+        # Smart model fallback tracking
+        self.captcha_model_strategy = self.config.get("captcha_model_strategy", "smart_fallback")
+        self.captcha_failure_threshold = self.config.get("captcha_failure_threshold", 5)
+        self.base_model_failures = 0
+        self.finetuned_model_failures = 0
+        self.current_captcha_model = None  # Will be determined on first use
+        
     def load_config(self, config_file: str) -> Dict:
         """Load configuration from JSON file"""
         try:
@@ -420,7 +427,9 @@ class SimpleMMOBot:
             "material_encounter": False,
             "material_session_id": None,
             "material_quantity": 0,
-            "material_name": None
+            "material_name": None,
+            "material_img_src": None,
+            "material_gather_url": None,
         }
         
         try:
@@ -437,15 +446,17 @@ class SimpleMMOBot:
                 # e.g. {"type": "npc", "value": 1234}  or  {"type": "material", "value": 5678}
                 raw_value = data.get("value")
 
-                # Log raw response when debug mode is on (or when type is unusual)
-                if self.config.get("debug_mode", False) or step_type not in (
-                    "", "gold", "exp", "experience", "none", "normal"
-                ):
-                    import json as _json
-                    # For item drops show the full text so HTML structure is visible
-                    _txt_preview = str(text) if step_type == "item" else str(text)[:120]
-                    self.logger.info(f"[RAW TRAVEL] type={step_type!r} value={raw_value!r} text={_txt_preview!r}")
-                    self.logger.debug(f"[RAW TRAVEL FULL] {_json.dumps(data)[:500]}")
+                # Always log the full raw JSON (helps identify actual field names)
+                import json as _json
+                import re as _img_re
+                # Show full text when it contains HTML (NPC/material encounters embed HTML in text field)
+                _text_has_html = "<img" in str(text) or "<span" in str(text) or "<div" in str(text)
+                _txt_preview = str(text) if (step_type == "item" or _text_has_html) else str(text)[:120]
+                self.logger.info(f"[RAW TRAVEL] type={step_type!r} value={raw_value!r} text={_txt_preview!r}")
+                # Full JSON for unusual types, debug mode, OR when text looks like an encounter (contains HTML)
+                _text_is_img = str(text).strip().startswith("<img")
+                if self.config.get("debug_mode", False) or step_type not in ("", "gold", "exp", "experience", "none", "normal", "item") or _text_has_html:
+                    self.logger.info(f"[RAW TRAVEL FULL] {_json.dumps(data)}")
 
                 # Check for CAPTCHA challenge
                 if "i-am-not-a-bot" in text.lower() or "hold up" in text.lower():
@@ -468,6 +479,41 @@ class SimpleMMOBot:
                 if isinstance(npc_data, dict):
                     npc_id = npc_id or npc_data.get("id") or npc_data.get("npc_id")
                     npc_name = npc_name or npc_data.get("name") or npc_data.get("npc_name")
+
+                # Priority 4: text HTML contains an avatar <img> — event NPC encounter
+                # e.g. text = "<img src='/img/sprites/events/lunar-new-year-26/avatars/lantern_sage.png'>..."
+                if not npc_from_type and not npc_id and _text_has_html:
+                    _text_str = str(text)
+                    # Avatar image = NPC encounter
+                    _av_m = _img_re.search(r"src=['\"]([^'\"]*?/avatars/[^'\"]+)", _text_str)
+                    if _av_m:
+                        # Try to extract NPC ID from text HTML (onclick, data attr, href, numeric id)
+                        _npc_id_pats = [
+                            r"attackNpc\((\d+)\)",
+                            r"attack_npc\((\d+)\)",
+                            r"npc[_-]?id[^\d]{0,10}(\d+)",
+                            r"data-npc[^=]*=['\"]?(\d+)",
+                            r"npcs/attack/(\d+)",
+                            r"battle.{0,20}npc.{0,20}(\d{3,})",
+                            r"/(npcs|npc)/view/(\d+)",
+                        ]
+                        for _p in _npc_id_pats:
+                            _pm = _img_re.search(_p, _text_str, _img_re.IGNORECASE)
+                            if _pm:
+                                npc_id = int(_pm.group(_pm.lastindex))
+                                break
+                        # Also try raw_value as fallback
+                        if not npc_id and raw_value:
+                            npc_id = raw_value
+                        # Extract NPC name from img src filename
+                        _av_fname = _av_m.group(1).rstrip("/").split("/")[-1]
+                        _av_fname = _img_re.sub(r'\.(gif|png|jpg|jpeg|webp)$', '', _av_fname, flags=_img_re.IGNORECASE)
+                        npc_name = npc_name or _av_fname.replace("_", " ").replace("-", " ").title()
+                        npc_from_type = True  # treat as a confirmed NPC encounter
+                        self.logger.info(
+                            f"[NPC IMG DETECT] name={npc_name!r} id={npc_id!r} "
+                            f"src={_av_m.group(1)!r}"
+                        )
 
                 # Only flag as NPC encounter if we have concrete evidence
                 if npc_from_type or npc_id:
@@ -506,6 +552,30 @@ class SimpleMMOBot:
                     ]
                     has_material_keywords = any(phrase in text_lower for phrase in material_phrases)
 
+                # Priority 4: text IS an <img> tag pointing to a material/event sprite
+                # e.g. text = "<img src='/img/sprites/events/.../emperors_fireworks.gif'>"
+                _text_is_img_material = False
+                _img_mat_name = None
+                _img_mat_session = None
+                if _text_is_img:  # set above near the logging block
+                    _src_m = _img_re.search(r"src=['\"]([^'\"]+)['\"]", text)
+                    if _src_m:
+                        _src = _src_m.group(1)
+                        # /avatars/ = NPC encounter, NOT a material — exclude it
+                        _is_avatar = "/avatars/" in _src
+                        if not _is_avatar and ("materials/" in _src or "/events/" in _src or "/sprites/" in _src):
+                            _text_is_img_material = True
+                            # Derive a human-readable name from the filename (e.g. "Emperors Fireworks")
+                            _fname = _src.rstrip("/").split("/")[-1]
+                            _fname = _img_re.sub(r'\.(gif|png|jpg|jpeg|webp)$', '', _fname, flags=_img_re.IGNORECASE)
+                            _img_mat_name = _fname.replace("_", " ").replace("-", " ").title()
+                            # raw_value is very likely the gathering session_id for these steps
+                            _img_mat_session = raw_value if raw_value else None
+                            self.logger.info(
+                                f"[MATERIAL IMG DETECT] name={_img_mat_name!r} "
+                                f"candidate_session_id={_img_mat_session!r} src={_src!r}"
+                            )
+
                 if material_from_type or material_session_id:
                     # Strong signal (type field or session ID) — always act
                     results["material_encounter"] = True
@@ -516,6 +586,13 @@ class SimpleMMOBot:
                         data.get("material_name") or data.get("materialName")
                         or data.get("name") or nested.get("name")
                     )
+                elif _text_is_img_material:
+                    # Event/material <img> in text field — set encounter and use raw_value as session_id
+                    results["material_encounter"] = True
+                    results["material_session_id"] = _img_mat_session
+                    results["material_quantity"] = data.get("quantity", data.get("amount", 1))
+                    results["material_name"] = _img_mat_name
+                    results["material_img_src"] = _src_m.group(1) if _src_m else None
                 elif has_material_keywords:
                     # Weak signal (text only) — flag but do NOT set a name derived from
                     # generic fields (avoids the 'Material' false positive)
@@ -523,7 +600,38 @@ class SimpleMMOBot:
                     results["material_session_id"] = None  # will be resolved from page HTML
                     results["material_quantity"] = data.get("quantity", data.get("amount", 1))
                     results["material_name"] = data.get("material_name") or data.get("materialName")
-                
+
+                # ── Scan ALL string values in the response for a signed gather URL ──
+                # SMMO sometimes embeds the gather URL directly in the travel API JSON,
+                # especially for event materials (e.g. Lunar New Year fireworks)
+                if results["material_encounter"] and not results.get("material_gather_url"):
+                    _SIGNED_PAT = _img_re.compile(
+                        r'https?://[^\s\'"]+/gathering/material/gather\?expires=\d+[^\s\'"]*',
+                        _img_re.IGNORECASE
+                    )
+                    def _scan_for_gather_url(obj, depth=0):
+                        if depth > 5:
+                            return None
+                        if isinstance(obj, str):
+                            m = _SIGNED_PAT.search(obj)
+                            if m:
+                                return m.group(0).replace("\\u0026", "&").replace("\\/", "/")
+                        elif isinstance(obj, dict):
+                            for v in obj.values():
+                                r = _scan_for_gather_url(v, depth + 1)
+                                if r:
+                                    return r
+                        elif isinstance(obj, list):
+                            for v in obj:
+                                r = _scan_for_gather_url(v, depth + 1)
+                                if r:
+                                    return r
+                        return None
+                    _found_gather_url = _scan_for_gather_url(data)
+                    if _found_gather_url:
+                        results["material_gather_url"] = _found_gather_url
+                        self.logger.info(f"[MATERIAL GATHER URL from API] {_found_gather_url!r}")
+
                 # ── Item drop (type='item') — parse name and rarity from HTML text ──
                 if step_type == "item" and text:
                     import re as _re
@@ -682,14 +790,38 @@ class SimpleMMOBot:
 
     # ── Gathering helpers ────────────────────────────────────────────────────
 
+    def _fetch_html(self, url: str, **kwargs) -> str:
+        """
+        GET a URL and return the response body as a decoded string.
+
+        Handles gzip-compressed responses that the requests session may not
+        automatically decompress (e.g. when a custom Accept header or session
+        adapter interferes with Content-Encoding negotiation).
+        """
+        import gzip as _gzip
+        kwargs.setdefault("allow_redirects", True)
+        kwargs.setdefault("timeout", 10)
+        # Force server to return identity (uncompressed) content.
+        # If server ignores this, fall back to manual decompression below.
+        headers = kwargs.pop("headers", {})
+        headers.setdefault("Accept-Encoding", "identity")
+        resp = self.session.get(url, headers=headers, **kwargs)
+        raw = resp.content
+        if raw[:2] == b'\x1f\x8b':
+            try:
+                return _gzip.decompress(raw).decode("utf-8", errors="replace")
+            except Exception:
+                pass
+        return resp.text
+
     def _extract_gathering_urls(self, html: str) -> dict:
         """
         Extract the signed gathering API URLs and session ID from a travel page.
 
-        SimpleMMO embeds signed URLs in the page HTML (same \/\ JSON-escape
+        SimpleMMO embeds signed URLs in the page HTML (same \\/\\ JSON-escape
         pattern as NPC attack URLs).  Three attempts per URL:
           1. Plain absolute URL
-          2. JSON-escaped (backslash-slashes + \u0026 ampersand)
+          2. JSON-escaped (backslash-slashes + \\u0026 ampersand)
           3. Relative path with query-string components
 
         Returns dict: {session_id, info_url, gather_url} — all may be None.
@@ -745,12 +877,81 @@ class SimpleMMOBot:
         result["info_url"]   = _find_url("api/gathering/material/information")
         result["gather_url"] = _find_url("api/gathering/material/gather")
 
-        self.logger.debug(
+        self.logger.info(
             f"[Gathering URLs] session_id={result['session_id']}  "
             f"info={'found' if result['info_url'] else 'missing'}  "
             f"gather={'found' if result['gather_url'] else 'missing'}"
         )
         return result
+
+    def _extract_npc_from_page(self, html: str, url: str = "") -> Optional[int]:
+        """
+        Try to find a pending NPC encounter ID from the /travel page HTML or redirect URL.
+        Returns the NPC ID as int, or None if no encounter is found.
+
+        SimpleMMO shows the NPC encounter panel on the /travel page AFTER a step triggers it.
+        The NPC ID can appear in many forms depending on how SMMO renders it.
+        """
+        import re as _re
+
+        # Check the redirect URL first (highest confidence)
+        for pat in [
+            r'/npcs/attack/([A-Za-z0-9]+)',
+            r'/npcs/battle/([A-Za-z0-9]+)',
+            r'/npcs/view/([A-Za-z0-9]+)',
+            r'/step-?npc/([A-Za-z0-9]+)',
+        ]:
+            m = _re.search(pat, url)
+            if m:
+                try:
+                    val = int(m.group(1))
+                    self.logger.info(f"[NPC detect] Found NPC ID={val} in redirect URL")
+                    return val
+                except ValueError:
+                    pass
+
+        # Search HTML for NPC ID using every known pattern
+        patterns = [
+            # Direct URL in HTML
+            r'/npcs/attack/([0-9]+)',
+            r'/npcs/battle/([0-9]+)',
+            r'/npcs/view/([0-9]+)',
+            r'/step-?npc/([0-9]+)',
+            # Alpine.js / JavaScript data
+            r'\bnpc_id["\s]*[=:]\s*["\']?([0-9]+)',
+            r'\bnpcId["\s]*[=:]\s*["\']?([0-9]+)',
+            # Quoted JSON field in Alpine x-data or game_data
+            r'"npc_id"\s*:\s*([0-9]+)',
+            r'"npcId"\s*:\s*([0-9]+)',
+            r'"step_npc"\s*:\s*([0-9]+)',
+            r'"encounter_npc"\s*:\s*([0-9]+)',
+            r'"npc\.id"\s*:\s*([0-9]+)',
+            # HTML data attributes
+            r'data-npc-id=["\']([0-9]+)["\']',
+            r'data-enemy-id=["\']([0-9]+)["\']',
+            r'data-npc=["\']([0-9]+)["\']',
+        ]
+        for pat in patterns:
+            m = _re.search(pat, html, _re.IGNORECASE)
+            if m:
+                try:
+                    val = int(m.group(1))
+                    self.logger.info(f"[NPC detect] Found NPC ID={val} via pattern: {pat}")
+                    return val
+                except ValueError:
+                    pass
+
+        # Log a snippet when the page looks like it has an NPC encounter (for future debugging)
+        npc_indicators = [
+            'npcs/attack', 'npc_id', 'npcId', 'step_npc', 'encounter',
+            'battle-npc', 'fight-npc', 'npc-encounter',
+        ]
+        if any(ind in html for ind in npc_indicators):
+            self.logger.info(
+                f"[NPC detect] Page has NPC-related content but ID not extracted "
+                f"— snippet: {html[:500]!r}"
+            )
+        return None
 
     def salvage_material(
         self,
@@ -758,6 +959,7 @@ class SimpleMMOBot:
         quantity: int = None,
         material_name: str = None,
         page_html: str = None,
+        gather_url: str = None,
     ) -> Dict[str, Any]:
         """
         Gather materials using the signed API URLs extracted from the travel page.
@@ -780,15 +982,32 @@ class SimpleMMOBot:
             # ── Step 1: get page HTML if not supplied ─────────────────────
             if page_html is None:
                 self.logger.debug("salvage_material: fetching /travel for signed URLs")
+                import gzip as _gzip
                 pr = self.session.get(
-                    f"{self.base_url}/travel", allow_redirects=True, timeout=10
+                    f"{self.base_url}/travel",
+                    headers={"Accept-Encoding": "identity"},
+                    allow_redirects=True,
+                    timeout=10,
                 )
-                page_html = pr.text if pr.status_code == 200 else ""
+                if pr.status_code == 200:
+                    _raw = pr.content
+                    if _raw[:2] == b'\x1f\x8b':
+                        try:
+                            page_html = _gzip.decompress(_raw).decode("utf-8", errors="replace")
+                        except Exception:
+                            page_html = pr.text
+                    else:
+                        page_html = pr.text
+                else:
+                    page_html = ""
 
             # ── Step 2: extract signed URLs ───────────────────────────────
             g = self._extract_gathering_urls(page_html)
-            info_url   = g["info_url"]
-            gather_url = g["gather_url"]
+            info_url = g["info_url"]
+            # Caller may supply a pre-extracted gather_url (e.g. from travel API response JSON)
+            # — only fall back to the page-HTML-extracted URL if none was supplied
+            if not gather_url:
+                gather_url = g["gather_url"]
 
             # Override session_id if we extracted a more reliable one from HTML
             if g["session_id"] and not material_session_id:
@@ -862,22 +1081,69 @@ class SimpleMMOBot:
                     quantity = 1
 
             # ── Step 4: gather endpoint ───────────────────────────────────
+            gr = None  # may be set by fallback loop below
             if not gather_url:
-                self.logger.error(
-                    f"No signed gather URL found in page HTML (len={len(page_html)}).  "
-                    f"Cannot gather {material_name or 'material'} (session={material_session_id})."
+                # No signed URL from page HTML or caller — try known unsigned fallback endpoints.
+                # SMMO event materials (e.g. Lunar New Year fireworks) may accept direct POSTs.
+                _api_base = "https://api.simple-mmo.com"
+                _web_base = self.base_url  # https://web.simple-mmo.com
+                _fallback_urls = [
+                    f"{_web_base}/api/gathering/material/gather",
+                    f"{_api_base}/api/gathering/material/gather",
+                    f"{_web_base}/api/gathering/gather",
+                    f"{_api_base}/api/gathering/gather",
+                ]
+                self.logger.warning(
+                    f"No signed gather URL — trying {len(_fallback_urls)} direct fallback endpoints "
+                    f"for session={material_session_id}"
                 )
+                for _fb_url in _fallback_urls:
+                    try:
+                        _fb_r = self.session.post(
+                            _fb_url,
+                            headers=api_headers,
+                            json={"quantity": quantity or 1, "id": material_session_id},
+                            timeout=10,
+                        )
+                        self.logger.info(
+                            f"Fallback gather {_fb_url!r} → HTTP {_fb_r.status_code} "
+                            f"body={_fb_r.text[:200]!r}"
+                        )
+                        if _fb_r.status_code == 200:
+                            _fb_data = _fb_r.json()
+                            if _fb_data.get("type") == "success" or _fb_data.get("status") == "success":
+                                gather_url = _fb_url   # record which one worked
+                                # reuse step-5 parsing below via a synthetic `gr`
+                                class _FakeResp:
+                                    status_code = 200
+                                    def json(self_inner):
+                                        return _fb_data
+                                gr = _FakeResp()
+                                break
+                    except Exception as _fb_e:
+                        self.logger.debug(f"Fallback {_fb_url!r} error: {_fb_e}")
+                        continue
+                else:
+                    self.logger.error(
+                        f"No signed gather URL and all fallbacks failed "
+                        f"(session={material_session_id}).  "
+                        f"Will log full response on next run when [RAW TRAVEL FULL] fires."
+                    )
+                    return {"success": False, "error": "Could not find gather URL (signed or fallback)"}
+
+            if not gather_url:
                 return {"success": False, "error": "Could not find signed gather URL in page"}
 
             label = f"'{material_name}'" if material_name else f"session={material_session_id}"
             self.logger.info(f"Gathering {label} x{quantity}")
 
-            gr = self.session.post(
-                gather_url,
-                headers=api_headers,
-                json={"quantity": quantity, "id": material_session_id},
-                timeout=15,
-            )
+            if gr is None:  # not set by fallback; do the real POST
+                gr = self.session.post(
+                    gather_url,
+                    headers=api_headers,
+                    json={"quantity": quantity, "id": material_session_id},
+                    timeout=15,
+                )
 
             if gr.status_code != 200:
                 self.logger.error(f"Gather HTTP {gr.status_code}: {gr.text[:300]}")
@@ -968,6 +1234,82 @@ class SimpleMMOBot:
         
         return ""
     
+    def _determine_captcha_model(self) -> str:
+        """
+        Determine which CLIP model to use based on strategy and failure counts.
+        Returns 'base' or 'finetuned'
+        """
+        import os
+        
+        finetuned_path = "models/clip-captcha-finetuned"
+        finetuned_exists = os.path.exists(finetuned_path)
+        
+        strategy = self.captcha_model_strategy
+        threshold = self.captcha_failure_threshold
+        
+        # If fine-tuned model doesn't exist, always use base
+        if not finetuned_exists:
+            if strategy == "finetuned_only":
+                self.logger.warning("finetuned_only strategy selected but model not found - using base")
+            return "base"
+        
+        # Strategy: base_only - always use base model
+        if strategy == "base_only":
+            return "base"
+        
+        # Strategy: finetuned_only - always use fine-tuned model
+        if strategy == "finetuned_only":
+            return "finetuned"
+        
+        # Strategy: smart_fallback - switch based on failure counts
+        if strategy == "smart_fallback":
+            # Initialize current model on first use
+            if self.current_captcha_model is None:
+                # Start with fine-tuned if available, else base
+                self.current_captcha_model = "finetuned"
+                self.logger.info(f"🤖 Smart Fallback: Starting with {self.current_captcha_model} model")
+            
+            # Check if we should switch models
+            if self.current_captcha_model == "base":
+                if self.base_model_failures >= threshold:
+                    self.logger.warning(f"⚠️ Base model failed {self.base_model_failures}x - switching to fine-tuned model")
+                    self.current_captcha_model = "finetuned"
+                    self.base_model_failures = 0  # Reset counter
+            elif self.current_captcha_model == "finetuned":
+                if self.finetuned_model_failures >= threshold:
+                    self.logger.warning(f"⚠️ Fine-tuned model failed {self.finetuned_model_failures}x - switching to base model")
+                    self.current_captcha_model = "base"
+                    self.finetuned_model_failures = 0  # Reset counter
+            
+            return self.current_captcha_model
+        
+        # Default fallback: use config's use_finetuned_captcha setting
+        return "finetuned" if self.config.get("use_finetuned_captcha", False) else "base"
+    
+    def _record_captcha_result(self, success: bool, model_used: str):
+        """
+        Track captcha solve result for smart fallback
+        Args:
+            success: Whether the captcha was solved successfully
+            model_used: 'base' or 'finetuned'
+        """
+        if success:
+            # Reset failure counters on success
+            if model_used == "base":
+                self.base_model_failures = 0
+                self.logger.info(f"✅ Base model success - reset failure counter")
+            elif model_used == "finetuned":
+                self.finetuned_model_failures = 0
+                self.logger.info(f"✅ Fine-tuned model success - reset failure counter")
+        else:
+            # Increment failure counter
+            if model_used == "base":
+                self.base_model_failures += 1
+                self.logger.warning(f"❌ Base model failed ({self.base_model_failures}/{self.captcha_failure_threshold})")
+            elif model_used == "finetuned":
+                self.finetuned_model_failures += 1
+                self.logger.warning(f"❌ Fine-tuned model failed ({self.finetuned_model_failures}/{self.captcha_failure_threshold})")
+    
     def _solve_captcha_on_page(self, driver, page_source: str) -> bool:
         """Solve CAPTCHA on an already loaded page (for retries)"""
         try:
@@ -1003,16 +1345,22 @@ class SimpleMMOBot:
             
             print(f"✓ Found {len(buttons)} CAPTCHA options for new challenge")
             
-            # Load AI model - check for fine-tuned version first
+            # Use smart model selection
+            model_choice = self._determine_captcha_model()
             finetuned_path = "models/clip-captcha-finetuned"
-            used_finetuned = os.path.exists(finetuned_path) and self.config.get("use_finetuned_captcha", True)
-            if used_finetuned:
-                print("🎯 Using fine-tuned CAPTCHA model")
+            
+            if model_choice == "finetuned":
+                print(f"🎯 Using fine-tuned CAPTCHA model (failures: {self.finetuned_model_failures}/{self.captcha_failure_threshold})")
+                self.logger.info(f"Using fine-tuned model (failures: {self.finetuned_model_failures})")
                 model = CLIPModel.from_pretrained(finetuned_path)
                 processor = CLIPProcessor.from_pretrained(finetuned_path)
+                model_used = "finetuned"
             else:
+                print(f"🔵 Using base CLIP model (failures: {self.base_model_failures}/{self.captcha_failure_threshold})")
+                self.logger.info(f"Using base model (failures: {self.base_model_failures})")
                 model = CLIPModel.from_pretrained("openai/clip-vit-base-patch32")
                 processor = CLIPProcessor.from_pretrained("openai/clip-vit-base-patch32")
+                model_used = "base"
             
             # Wait for images to load
             time.sleep(2)
@@ -1096,36 +1444,13 @@ class SimpleMMOBot:
             second_best_score = int(scores[1][1]) if len(scores) > 1 else 0
             margin = best_score - second_best_score
 
-            # Fallback: if fine-tuned gave low confidence, re-score with base CLIP
-            if used_finetuned and (best_score < 60 or margin < 15):
-                print(f"⚠ Fine-tuned confidence low ({best_score}%, margin {margin}%) — trying base CLIP as fallback...")
-                self.logger.warning(f"Fine-tuned low confidence ({best_score}%, margin {margin}%), falling back to base CLIP")
-                base_model = CLIPModel.from_pretrained("openai/clip-vit-base-patch32")
-                base_proc  = CLIPProcessor.from_pretrained("openai/clip-vit-base-patch32")
-                base_inputs = base_proc(
-                    text=[required_item, required_item.lower(), required_item.title(),
-                          f"a {required_item}", f"an {required_item}", f"the {required_item}",
-                          f"{required_item} item", f"picture of {required_item}",
-                          f"image of {required_item}", f"{required_item} object"],
-                    images=[img_data['image'] for img_data in button_images],
-                    return_tensors="pt", padding='max_length', truncation=True, max_length=77
-                )
-                base_probs = base_model(**base_inputs).logits_per_image.softmax(dim=1)
-                base_scores = sorted(
-                    [(i, max(base_probs[i].tolist()) * 100) for i in range(len(button_images))],
-                    key=lambda x: x[1], reverse=True
-                )
-                base_best  = int(base_scores[0][1])
-                base_margin = base_best - int(base_scores[1][1]) if len(base_scores) > 1 else base_best
-                print(f"  Base CLIP: Button {base_scores[0][0]+1} with {base_best}% confidence (margin {base_margin}%)")
-                if base_best > best_score:
-                    print(f"  Switching to base CLIP result (higher confidence: {base_best}% > {best_score}%)")
-                    scores    = base_scores
-                    best_idx  = scores[0][0] + 1
-                    best_score = base_best
-                    margin    = base_margin
-                else:
-                    print(f"  Keeping fine-tuned result ({best_score}% >= base {base_best}%)")
+            # Log confidence warnings
+            if best_score < 60:
+                print(f"⚠ WARNING: Low AI confidence ({best_score}%) - might be wrong!")
+                self.logger.warning(f"Low confidence: {best_score}%")
+
+            if margin < 8:
+                self.logger.warning(f"Small margin: {margin}%")
 
             print(f"\nBest match for new challenge: Button {best_idx} with {best_score}% confidence")
             
@@ -1154,6 +1479,9 @@ class SimpleMMOBot:
                 print("✓ New CAPTCHA solved successfully!")
                 self.logger.info("New CAPTCHA solved!")
                 
+                # Record successful result for smart fallback tracking
+                self._record_captcha_result(success=True, model_used=model_used)
+                
                 # Record successful attempt for auto-learning
                 try:
                     from auto_captcha_learner import AutoCaptchaLearner
@@ -1170,6 +1498,9 @@ class SimpleMMOBot:
                 return True
             else:
                 print(f"✗ New CAPTCHA also failed")
+                
+                # Record failed result for smart fallback tracking
+                self._record_captcha_result(success=False, model_used=model_used)
                 
                 # Record failed attempt for auto-learning
                 try:
@@ -1311,17 +1642,23 @@ class SimpleMMOBot:
                 print("Loading AI vision model (CLIP)...")
                 self.logger.info("Loading CLIP model for image recognition...")
                 
-                # Load CLIP model - check for fine-tuned version first
+                # Use smart model selection
+                model_choice = self._determine_captcha_model()
                 finetuned_path = "models/clip-captcha-finetuned"
-                used_finetuned = os.path.exists(finetuned_path) and self.config.get("use_finetuned_captcha", True)
-                if used_finetuned:
-                    print("🎯 Using fine-tuned CAPTCHA model")
+                
+                if model_choice == "finetuned":
+                    print(f"🎯 Using fine-tuned CAPTCHA model (failures: {self.finetuned_model_failures}/{self.captcha_failure_threshold})")
+                    self.logger.info(f"Using fine-tuned model (failures: {self.finetuned_model_failures})")
                     model = CLIPModel.from_pretrained(finetuned_path)
                     processor = CLIPProcessor.from_pretrained(finetuned_path)
+                    model_used = "finetuned"
                 else:
                     # Load base CLIP model - this can recognize objects in images
+                    print(f"🔵 Using base CLIP model (failures: {self.base_model_failures}/{self.captcha_failure_threshold})")
+                    self.logger.info(f"Using base model (failures: {self.base_model_failures})")
                     model = CLIPModel.from_pretrained("openai/clip-vit-base-patch32")
                     processor = CLIPProcessor.from_pretrained("openai/clip-vit-base-patch32")
+                    model_used = "base"
                 
                 print(f"Analyzing images to find: {required_item}")
                 self.logger.info(f"Using AI to identify: {required_item}")
@@ -1466,36 +1803,8 @@ class SimpleMMOBot:
                 print(f"\nBest match: Button {best_idx} with {best_score}% confidence")
                 self.logger.info(f"Best match: Button {best_idx} with {best_score}% confidence")
 
-                # Fallback: if fine-tuned gave low confidence, re-score with base CLIP
-                if used_finetuned and (best_score < 60 or margin < 8):
-                    print(f"⚠ Fine-tuned confidence low ({best_score}%, margin {margin}%) — trying base CLIP as fallback...")
-                    self.logger.warning(f"Fine-tuned low confidence ({best_score}%, margin {margin}%), falling back to base CLIP")
-                    base_model = CLIPModel.from_pretrained("openai/clip-vit-base-patch32")
-                    base_proc  = CLIPProcessor.from_pretrained("openai/clip-vit-base-patch32")
-                    with torch.no_grad():
-                        base_probs = base_model(**base_proc(
-                            text=text_variations, images=all_images,
-                            return_tensors="pt", padding='max_length', truncation=True, max_length=77
-                        )).logits_per_image.softmax(dim=1)
-                    base_button_scores = []
-                    for i, img_data in enumerate(button_images):
-                        base_s = int(base_probs[i].max().item() * 100)
-                        base_button_scores.append({'idx': img_data['idx'] + 1, 'score': base_s, 'button': img_data['button']})
-                        print(f"  [Base CLIP] Button {img_data['idx']+1}: {base_s}%")
-                    base_sorted = sorted(base_button_scores, key=lambda x: x['score'], reverse=True)
-                    base_best   = base_sorted[0]['score']
-                    base_margin = base_best - base_sorted[1]['score'] if len(base_sorted) >= 2 else base_best
-                    print(f"  Base CLIP best: Button {base_sorted[0]['idx']} with {base_best}% (margin {base_margin}%)")
-                    if base_best > best_score:
-                        print(f"  Switching to base CLIP result (higher confidence: {base_best}% > {best_score}%)")
-                        self.logger.info(f"Using base CLIP fallback: {base_best}% > finetuned {best_score}%")
-                        best_match = base_sorted[0]['button']
-                        best_idx   = base_sorted[0]['idx']
-                        best_score = base_best
-                        margin     = base_margin
-                    else:
-                        print(f"  Keeping fine-tuned result ({best_score}% >= base {base_best}%)")
-                elif best_score < 60:
+                # Log confidence warnings
+                if best_score < 60:
                     print(f"⚠ WARNING: Low AI confidence ({best_score}%) - might be wrong!")
                     self.logger.warning(f"Low confidence: {best_score}%")
 
@@ -1551,6 +1860,9 @@ class SimpleMMOBot:
                             print("✓ CAPTCHA solved successfully!")
                             self.logger.info("CAPTCHA solved successfully with AI!")
                             
+                            # Record successful result for smart fallback tracking
+                            self._record_captcha_result(success=True, model_used=model_used)
+                            
                             # Record successful attempt for auto-learning
                             try:
                                 from auto_captcha_learner import AutoCaptchaLearner
@@ -1569,6 +1881,9 @@ class SimpleMMOBot:
                             # Form is gone and not on CAPTCHA page anymore
                             print("✓ CAPTCHA solved successfully!")
                             self.logger.info("CAPTCHA solved - form disappeared")
+                            
+                            # Record successful result for smart fallback tracking
+                            self._record_captcha_result(success=True, model_used=model_used)
                             
                             # Record successful attempt for auto-learning
                             try:
@@ -1613,6 +1928,9 @@ class SimpleMMOBot:
                                 except Exception as e:
                                     self.logger.debug(f"Auto-learning save failed: {e}")
                                 
+                                # Record successful result for smart fallback tracking
+                                self._record_captcha_result(success=True, model_used=model_used)
+                                
                                 return True
                             
                             # Still on CAPTCHA page - check what happened
@@ -1629,6 +1947,9 @@ class SimpleMMOBot:
                                 self.logger.warning("CAPTCHA cooldown detected")
                                 print(f"⏱️  CAPTCHA cooldown/lockout detected")
                                 print(f"  AI picked button {best_idx} (confidence: {best_score}%)")
+                                
+                                # Record failed result for smart fallback tracking
+                                self._record_captcha_result(success=False, model_used=model_used)
                                 
                                 # Record failed attempt for auto-learning
                                 try:
@@ -1654,6 +1975,9 @@ class SimpleMMOBot:
                                     print(f"  Previous: {required_item}")
                                     print(f"  New: {new_required_item}")
                                     print(f"  Attempting to solve new challenge...\n")
+                                    
+                                    # Record failed result for smart fallback tracking
+                                    self._record_captcha_result(success=False, model_used=model_used)
                                     
                                     # Record failed attempt for auto-learning
                                     try:
@@ -1691,6 +2015,9 @@ class SimpleMMOBot:
                             self.logger.warning("CAPTCHA submission failed - wrong answer")
                             print(f"✗ Wrong answer - AI picked button {best_idx}")
                             print(f"  Confidence was {best_score}% with {margin}% margin")
+                            
+                            # Record failed result for smart fallback tracking
+                            self._record_captcha_result(success=False, model_used=model_used)
                             
                             # Record failed attempt for auto-learning
                             try:
@@ -1853,30 +2180,30 @@ class SimpleMMOBot:
             self.logger.info(f"Attacking NPC ID: {npc_id}...")
 
             # ── Step 1: GET NPC page and extract signed attack URL ────────────
-            page_resp = self.session.get(
-                f"{self.base_url}/npcs/attack/{npc_id}",
-                headers={"Accept": "text/html"},
-                timeout=10,
+            # Use ?new_page=true to match the browser href from the travel API text.
+            html = self._fetch_html(
+                f"{self.base_url}/npcs/attack/{npc_id}?new_page=true",
+                headers={"Referer": f"{self.base_url}/travel"},
             )
-            if page_resp.status_code != 200:
-                self.logger.error(f"Failed to load NPC page: HTTP {page_resp.status_code}")
-                return {"success": False, "error": f"HTTP {page_resp.status_code}"}
+            if not html:
+                self.logger.error(f"Failed to load NPC page (empty response)")
+                return {"success": False, "error": "Empty NPC page response"}
+            attack_url = None
 
-            html = page_resp.text
-
-            # Pattern 1: plain unescaped absolute URL
+            # Pattern 1: plain absolute URL on web.simple-mmo.com OR api.simple-mmo.com
             _m = _re.search(
-                r'(https://web\.simple-mmo\.com/api/npcs/attack/[A-Za-z0-9]+'
+                r'(https://(?:web|api)\.simple-mmo\.com/api/npcs/attack/[A-Za-z0-9]+'
                 r'\?expires=\d+&(?:amp;)?signature=[a-f0-9]+)',
                 html,
             )
             if _m:
                 attack_url = _m.group(1).replace("&amp;", "&")
-                self.logger.debug(f"Signed URL (plain): {attack_url}")
-            else:
+                self.logger.info(f"Signed URL (plain): {attack_url}")
+
+            if not attack_url:
                 # Pattern 2: JSON-escaped — \/ slashes and \u0026 ampersand
                 _m = _re.search(
-                    r'https:\\/\\/web\.simple-mmo\.com\\/api\\/npcs\\/attack\\/([A-Za-z0-9]+)'
+                    r'https:\\/\\/(?:web|api)\.simple-mmo\.com\\/api\\/npcs\\/attack\\/([A-Za-z0-9]+)'
                     r'\?expires=(\d+)(?:\\u0026|&(?:amp;)?)signature=([a-f0-9]+)',
                     html,
                 )
@@ -1885,34 +2212,40 @@ class SimpleMMOBot:
                         f"{self.base_url}/api/npcs/attack/{_m.group(1)}"
                         f"?expires={_m.group(2)}&signature={_m.group(3)}"
                     )
-                    self.logger.debug(f"Signed URL (JSON-escaped): {attack_url}")
-                else:
-                    # Pattern 3: assemble from separate token + expires + signature fields
-                    _tok = _re.search(r'/api/npcs/attack/([A-Za-z0-9]{4,12})[\'"\s?]', html)
-                    _exp = _re.search(r'expires["\']?\s*[=:]\s*["\']?(\d{10,})', html)
-                    _sig = _re.search(r'signature["\']?\s*[=:]\s*["\']?([a-f0-9]{40,})', html)
-                    if _tok and _exp and _sig:
-                        attack_url = (
-                            f"{self.base_url}/api/npcs/attack/{_tok.group(1)}"
-                            f"?expires={_exp.group(1)}&signature={_sig.group(1)}"
-                        )
-                        self.logger.debug(f"Signed URL (assembled): {attack_url}")
-                    else:
-                        # Fallback — will surface 404/error so we can diagnose
-                        attack_url = f"{self.base_url}/api/npcs/attack/{npc_id}"
-                        self.logger.warning(
-                            f"No signed URL found in NPC page (len={len(html)}); using unsigned fallback"
-                        )
+                    self.logger.info(f"Signed URL (JSON-escaped): {attack_url}")
+
+            if not attack_url:
+                # Pattern 3: assemble from separate token + expires + signature fields
+                # Token can be short alphanumeric OR a long numeric instance ID
+                _tok = _re.search(r'/api/npcs/attack/([A-Za-z0-9]{4,20})[\'"\s?]', html)
+                _exp = _re.search(r'expires["\']?\s*[=:]\s*["\']?(\d{10,})', html)
+                _sig = _re.search(r'signature["\']?\s*[=:]\s*["\']?([a-f0-9]{40,})', html)
+                if _tok and _exp and _sig:
+                    attack_url = (
+                        f"{self.base_url}/api/npcs/attack/{_tok.group(1)}"
+                        f"?expires={_exp.group(1)}&signature={_sig.group(1)}"
+                    )
+                    self.logger.info(f"Signed URL (assembled): {attack_url}")
+
+            if not attack_url:
+                # Log a chunk of the page so we can see the actual URL format
+                self.logger.warning(
+                    f"No signed URL found in NPC page (len={len(html)}, "
+                    f"final_url={page_resp.url!r}).\n"
+                    f"[NPC PAGE SNIPPET] {html[:1500]!r}"
+                )
+                return {"success": False, "error": "No signed attack URL found in NPC page"}
 
             self.logger.info(f"Attack URL: {attack_url}")
 
-            # ── Step 2: Attack loop ───────────────────────────────────────────
+            # ── Step 2: Attack loop (same headers as Battle Arena bot) ─────────
             attack_headers = {
-                "X-XSRF-TOKEN": self.csrf_token,
-                "Content-Type": "application/json",
+                "X-XSRF-TOKEN":  self.csrf_token,
+                "Content-Type":  "application/json",
                 "Accept":        "application/json",
                 "Origin":        self.base_url,
                 "Referer":       f"{self.base_url}/travel",
+                "Authorization": f"Bearer {self.api_token}" if self.api_token else "",
             }
 
             total_damage = 0
@@ -1942,6 +2275,13 @@ class SimpleMMOBot:
 
                 if r.status_code != 200:
                     self.logger.error(f"Attack HTTP {r.status_code}: {r.text[:300]}")
+                    # Non-retriable errors — abort immediately instead of retrying 100 times
+                    if r.status_code in (404, 401, 403, 410):
+                        self.logger.error(
+                            f"Fatal attack error (HTTP {r.status_code}) — "
+                            f"aborting battle with NPC {npc_id}"
+                        )
+                        return {"success": False, "error": f"HTTP {r.status_code}"}
                     time.sleep(1)
                     continue
 
@@ -2049,8 +2389,7 @@ class SimpleMMOBot:
         material_gather_data = None
         
         try:
-            travel_page = self.session.get(f"{self.base_url}/travel", allow_redirects=True)
-            page_html = travel_page.text
+            page_html = self._fetch_html(f"{self.base_url}/travel")
             
             import re
             # ── Pre-travel: detect pending material encounter ─────────────────
@@ -2083,13 +2422,8 @@ class SimpleMMOBot:
                         }
             
             # ── Pre-travel: detect pending NPC battle ──────────────────────────
-            # Check redirect URL first, then fall back to page HTML
-            npc_id_pretrav = None
-            npc_url_check = re.search(r'/npcs/(?:attack|battle)/(\d+)', travel_page.url)
-            if not npc_url_check:
-                npc_url_check = re.search(r'/npcs/(?:attack|battle)/(\d+)', page_html)
-            if npc_url_check:
-                npc_id_pretrav = int(npc_url_check.group(1))
+            # Use the comprehensive extractor (URL redirect + all HTML patterns)
+            npc_id_pretrav = self._extract_npc_from_page(page_html, travel_page.url)
 
             if npc_id_pretrav:
                 npc_id = npc_id_pretrav
@@ -2166,10 +2500,7 @@ class SimpleMMOBot:
                     if parsed.get("material_encounter") and not parsed.get("material_session_id"):
                         self.logger.info("Material encounter detected — re-fetching /travel page for signed URLs...")
                         try:
-                            tp = self.session.get(
-                                f"{self.base_url}/travel", allow_redirects=True, timeout=10
-                            )
-                            ph = tp.text
+                            ph = self._fetch_html(f"{self.base_url}/travel")
                             self.logger.debug(f"[TRAVEL PAGE SNIPPET] {ph[:600]}")
 
                             g2 = self._extract_gathering_urls(ph)
@@ -2193,14 +2524,41 @@ class SimpleMMOBot:
                     if parsed.get("material_encounter") and parsed.get("material_session_id") and not material_gather_data:
                         if self.config.get("auto_gather_materials", True):
                             msid = parsed["material_session_id"]
-                            self.logger.info(f"Gathering material (session={msid})")
+                            _pre_gather_url = parsed.get("material_gather_url")
+                            self.logger.info(
+                                f"Gathering material (session={msid}"
+                                f"{', pre-url='+repr(_pre_gather_url) if _pre_gather_url else ''})"
+                            )
                             # Pass refetched page HTML so signed URLs don't need another fetch
-                            gr = self.salvage_material(msid, page_html=ph)
+                            gr = self.salvage_material(msid, page_html=ph, gather_url=_pre_gather_url)
                             if gr.get("success"):
                                 material_gather_data = gr
                                 self.logger.info("Material gathered after travel step.")
                             else:
                                 self.logger.warning(f"Material gather failed: {gr.get('error')}")
+
+                    # ── Attack NPC detected in travel API response ────────────────
+                    if parsed.get("npc_encounter") and parsed.get("npc_id") and not npc_battle_data:
+                        if self.config.get("auto_battle_npcs", True):
+                            _enc_npc_id   = parsed["npc_id"]
+                            _enc_npc_name = parsed.get("npc_name") or "Unknown NPC"
+                            self.logger.info(
+                                f"NPC encounter in travel response: "
+                                f"attacking {_enc_npc_name!r} (ID={_enc_npc_id})"
+                            )
+                            _br = self.attack_npc(_enc_npc_id)
+                            if _br.get("success"):
+                                npc_battle_data = _br.get("data", {"victory": True})
+                                self.logger.info(f"NPC {_enc_npc_name!r} defeated!")
+                            else:
+                                self.logger.warning(
+                                    f"NPC battle failed: {_br.get('error')}"
+                                )
+                        else:
+                            self.logger.info(
+                                f"NPC encounter detected (ID={parsed['npc_id']}) "
+                                f"but auto_battle_npcs is disabled — skipping"
+                            )
 
                     # Include NPC/material battle data collected so far
                     result = {"success": True, "data": result_data, "parsed": parsed}
@@ -2209,40 +2567,83 @@ class SimpleMMOBot:
                     if material_gather_data:
                         result["material_gather"] = material_gather_data
 
-                    # ── Handle NPC encounter from travel API response ─────────────
-                    # Case A: we have npc_id directly from the response
-                    # Case B: type=npc but no id — re-fetch travel page, look for redirect
-                    npc_id_for_battle = parsed.get("npc_id")
-                    if parsed.get("npc_encounter") and not npc_id_for_battle and not npc_battle_data:
-                        self.logger.info("NPC encounter signalled but no npc_id — re-fetching /travel to find redirect...")
+                    # ── Post-travel page check (UNCONDITIONAL) ───────────────────
+                    # SMMO shows NPC encounters and material gathers on the /travel page
+                    # AFTER a step — not in the travel API response payload.
+                    # We re-fetch /travel after every step to catch them.
+                    if not npc_battle_data or not material_gather_data:
                         try:
-                            tp2 = self.session.get(f"{self.base_url}/travel", allow_redirects=True)
-                            npc_url_match = _re.search(r'/npcs/(?:attack|battle)/(\d+)', tp2.url)
-                            if not npc_url_match:
-                                npc_url_match = _re.search(r'/npcs/(?:attack|battle)/(\d+)', tp2.text)
-                            if npc_url_match:
-                                npc_id_for_battle = int(npc_url_match.group(1))
-                                self.logger.info(f"Found NPC ID {npc_id_for_battle} from travel page redirect")
-                        except Exception as e:
-                            self.logger.error(f"Error re-fetching /travel for NPC: {e}")
-
-                    if parsed.get("npc_encounter") and npc_id_for_battle and not npc_battle_data:
-                        self.logger.info(f"Travel step triggered NPC encounter (ID: {npc_id_for_battle})")
-                        if self.config.get("auto_battle_npcs", True):
-                            self.logger.info("Auto-battling NPC from travel result...")
-                            battle_result = self.attack_npc(npc_id_for_battle)
-                            if battle_result.get("success"):
-                                result["npc_battle"] = battle_result.get("data", {"victory": True})
-                                self.logger.info("NPC defeated after travel step.")
+                            self.logger.info("Post-travel: fetching /travel to check for NPC/material...")
+                            pt_html = self._fetch_html(f"{self.base_url}/travel")
+                            pt_final_url = f"{self.base_url}/travel"
+                            # Log full snippet when the page looks like it has an encounter
+                            # (encounter keywords present), otherwise brief
+                            _has_encounter_hint = (
+                                "npcs/attack" in pt_html[:4000].lower()
+                                or "npc_id" in pt_html[:4000].lower()
+                                or "battle_npc" in pt_html[:4000].lower()
+                                or "material_session" in pt_html[:4000].lower()
+                                or "gathering_session" in pt_html[:4000].lower()
+                                or "gathering/material" in pt_html[:4000].lower()
+                            )
+                            if _has_encounter_hint:
+                                self.logger.info(
+                                    f"[POST-TRAVEL ENCOUNTER HINT] "
+                                    f"len={len(pt_html)} snippet={pt_html[:2000]!r}"
+                                )
                             else:
-                                self.logger.warning(f"NPC battle after travel failed: {battle_result.get('error')}")
-                        else:
-                            self.logger.info("NPC encounter detected but auto_battle_npcs is disabled — skipping")
+                                self.logger.info(
+                                    f"Post-travel page: len={len(pt_html)} (no encounter keywords)"
+                                )
+
+                            # Material check (if not already gathered this step)
+                            if not material_gather_data and self.config.get("auto_gather_materials", True):
+                                pt_g = self._extract_gathering_urls(pt_html)
+                                if pt_g.get("session_id"):
+                                    self.logger.info(
+                                        f"Post-travel: material encounter found "
+                                        f"(session_id={pt_g['session_id']})"
+                                    )
+                                    gr = self.salvage_material(pt_g["session_id"], page_html=pt_html)
+                                    if gr.get("success"):
+                                        material_gather_data = gr
+                                        result["material_gather"] = material_gather_data
+                                        self.logger.info("Post-travel: material gathered successfully.")
+                                    else:
+                                        self.logger.warning(
+                                            f"Post-travel: material gather failed: {gr.get('error')}"
+                                        )
+
+                            # NPC check (if not already battled this step)
+                            if not npc_battle_data and self.config.get("auto_battle_npcs", True):
+                                pt_npc_id = self._extract_npc_from_page(pt_html, pt.url)
+                                if pt_npc_id:
+                                    self.logger.info(
+                                        f"Post-travel: NPC encounter found (ID={pt_npc_id})"
+                                    )
+                                    battle_result = self.attack_npc(pt_npc_id)
+                                    if battle_result.get("success"):
+                                        result["npc_battle"] = battle_result.get(
+                                            "data", {"victory": True}
+                                        )
+                                        npc_battle_data = result["npc_battle"]
+                                        self.logger.info("Post-travel: NPC defeated.")
+                                    else:
+                                        self.logger.warning(
+                                            f"Post-travel: NPC battle failed: "
+                                            f"{battle_result.get('error')}"
+                                        )
+
+                        except Exception as e:
+                            self.logger.warning(f"Post-travel check failed: {e}")
 
                     return result
                 except Exception as e:
-                    # Response might not be JSON
-                    self.logger.info("Travel step completed")
+                    # Travel API returned non-JSON (could be NPC page HTML or error page)
+                    self.logger.warning(
+                        f"Travel API response was not JSON: {e} — "
+                        f"raw={response.text[:600]!r}"
+                    )
                     result = {"success": True, "data": {}, "parsed": {}}
                     if npc_battle_data:
                         result["npc_battle"] = npc_battle_data
