@@ -95,7 +95,7 @@ class AFK24x7Bot:
         print(f"🎁 Total Items: {self.stats['total_items']}")
         print(f"🤖 CAPTCHAs Solved: {self.stats['captchas_solved']}")
         print(f"⚔️  NPC Battles: {self.stats['npc_battles']}")
-        print(f"🔨 Materials Gathered: {self.stats['materials_gathered']}")
+        print(f"🔨 Materials Gathered: {self.stats['materials_gathered']}x")
         if self.stats['materials_log']:
             for _mat_name, _mat_qty in sorted(self.stats['materials_log'].items()):
                 print(f"   • {_mat_name}: x{_mat_qty}")
