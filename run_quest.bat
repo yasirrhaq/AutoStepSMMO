@@ -80,8 +80,12 @@ echo ============================================================
 echo  Quest runner stopped.
 echo ============================================================
 echo.
-choice /c RC /t 10 /d R /m "Press R to Restart, C to Close (auto-restart in 10s)"
-if errorlevel 2 goto end
+echo  Press Enter to restart, or C to close.
+echo.
+:ask_quest
+powershell -NoProfile -Command "$k=$Host.UI.RawUI.ReadKey('NoEcho,IncludeKeyDown'); if($k.VirtualKeyCode -eq 13){exit 0}elseif($k.VirtualKeyCode -eq 67){exit 1}else{exit 2}"
+if errorlevel 2 goto ask_quest
+if errorlevel 1 goto end
 goto start
 
 :end
