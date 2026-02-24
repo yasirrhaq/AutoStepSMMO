@@ -1,0 +1,12 @@
+{
+  "question": "Empty Bottle",
+  "button_clicked": 4,
+  "success": false,
+  "correct_answer": 3,
+  "timestamp": "20260224_100244_273812",
+  "datetime": "2026-02-24T10:02:44.274008",
+  "auto_labeled": true,
+  "auto_label_conf": 85.34,
+  "auto_label_tool": "base-clip-realtime",
+  "labeled_at": "2026-02-24T10:02:44.426435"
+}

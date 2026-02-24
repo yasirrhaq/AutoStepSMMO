@@ -1,0 +1,12 @@
+{
+  "question": "Strawberry",
+  "button_clicked": 1,
+  "success": false,
+  "correct_answer": 4,
+  "timestamp": "20260224_144301_000925",
+  "datetime": "2026-02-24T14:43:01.001128",
+  "auto_labeled": true,
+  "auto_label_conf": 97.82,
+  "auto_label_tool": "base-clip-realtime",
+  "labeled_at": "2026-02-24T14:43:01.141187"
+}

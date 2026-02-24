@@ -1,0 +1,12 @@
+{
+  "question": "Piece of Meat",
+  "button_clicked": 3,
+  "success": false,
+  "correct_answer": 1,
+  "timestamp": "20260224_161453_949899",
+  "datetime": "2026-02-24T16:14:53.950361",
+  "auto_labeled": true,
+  "auto_label_conf": 90.16,
+  "auto_label_tool": "base-clip-realtime",
+  "labeled_at": "2026-02-24T16:15:00.127599"
+}

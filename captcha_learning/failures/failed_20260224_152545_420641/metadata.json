@@ -1,0 +1,12 @@
+{
+  "question": "Cannon",
+  "button_clicked": 3,
+  "success": false,
+  "correct_answer": 4,
+  "timestamp": "20260224_152545_420641",
+  "datetime": "2026-02-24T15:25:45.420831",
+  "auto_labeled": true,
+  "auto_label_conf": 67.63,
+  "auto_label_tool": "base-clip-realtime",
+  "labeled_at": "2026-02-24T15:25:45.560122"
+}

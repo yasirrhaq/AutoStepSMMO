@@ -1,0 +1,12 @@
+{
+  "question": "Rose",
+  "button_clicked": 3,
+  "success": false,
+  "correct_answer": 4,
+  "timestamp": "20260224_163819_603357",
+  "datetime": "2026-02-24T16:38:19.603579",
+  "auto_labeled": true,
+  "auto_label_conf": 99.62,
+  "auto_label_tool": "base-clip-realtime",
+  "labeled_at": "2026-02-24T16:38:19.743345"
+}

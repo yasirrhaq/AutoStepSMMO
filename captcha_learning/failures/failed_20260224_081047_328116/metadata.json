@@ -1,0 +1,12 @@
+{
+  "question": "Cherry",
+  "button_clicked": 1,
+  "success": false,
+  "correct_answer": 2,
+  "timestamp": "20260224_081047_328116",
+  "datetime": "2026-02-24T08:10:47.328350",
+  "auto_labeled": true,
+  "auto_label_conf": 58.77,
+  "auto_label_tool": "base-clip-realtime",
+  "labeled_at": "2026-02-24T08:10:47.469832"
+}

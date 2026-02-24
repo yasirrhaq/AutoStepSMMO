@@ -1,0 +1,12 @@
+{
+  "question": "Fire",
+  "button_clicked": 2,
+  "success": false,
+  "correct_answer": 4,
+  "timestamp": "20260224_084845_897352",
+  "datetime": "2026-02-24T08:48:45.897545",
+  "auto_labeled": true,
+  "auto_label_conf": 52.09,
+  "auto_label_tool": "base-clip-realtime",
+  "labeled_at": "2026-02-24T08:48:46.038208"
+}

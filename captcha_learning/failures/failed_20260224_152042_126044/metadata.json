@@ -1,0 +1,12 @@
+{
+  "question": "Egg",
+  "button_clicked": 4,
+  "success": false,
+  "correct_answer": 3,
+  "timestamp": "20260224_152042_126044",
+  "datetime": "2026-02-24T15:20:42.126248",
+  "auto_labeled": true,
+  "auto_label_conf": 76.89,
+  "auto_label_tool": "base-clip-realtime",
+  "labeled_at": "2026-02-24T15:20:42.266685"
+}

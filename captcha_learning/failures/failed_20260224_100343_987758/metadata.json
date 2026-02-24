@@ -1,0 +1,12 @@
+{
+  "question": "Lemon",
+  "button_clicked": 2,
+  "success": false,
+  "correct_answer": 4,
+  "timestamp": "20260224_100343_987758",
+  "datetime": "2026-02-24T10:03:43.987958",
+  "auto_labeled": true,
+  "auto_label_conf": 87.05,
+  "auto_label_tool": "base-clip-realtime",
+  "labeled_at": "2026-02-24T10:03:44.129396"
+}

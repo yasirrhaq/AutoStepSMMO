@@ -1,0 +1,12 @@
+{
+  "question": "House",
+  "button_clicked": 1,
+  "success": false,
+  "correct_answer": 4,
+  "timestamp": "20260224_164108_866585",
+  "datetime": "2026-02-24T16:41:08.866778",
+  "auto_labeled": true,
+  "auto_label_conf": 77.32,
+  "auto_label_tool": "base-clip-realtime",
+  "labeled_at": "2026-02-24T16:41:09.005457"
+}

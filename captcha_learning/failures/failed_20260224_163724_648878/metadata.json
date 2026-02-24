@@ -1,0 +1,12 @@
+{
+  "question": "Candy Corn",
+  "button_clicked": 3,
+  "success": false,
+  "correct_answer": 4,
+  "timestamp": "20260224_163724_648878",
+  "datetime": "2026-02-24T16:37:24.649083",
+  "auto_labeled": true,
+  "auto_label_conf": 56.82,
+  "auto_label_tool": "base-clip-realtime",
+  "labeled_at": "2026-02-24T16:37:24.789092"
+}

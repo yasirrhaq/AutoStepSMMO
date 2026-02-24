@@ -1,0 +1,12 @@
+{
+  "question": "Clock",
+  "button_clicked": 3,
+  "success": false,
+  "correct_answer": 4,
+  "timestamp": "20260224_161334_163202",
+  "datetime": "2026-02-24T16:13:34.163430",
+  "auto_labeled": true,
+  "auto_label_conf": 82.91,
+  "auto_label_tool": "base-clip-realtime",
+  "labeled_at": "2026-02-24T16:13:34.303906"
+}

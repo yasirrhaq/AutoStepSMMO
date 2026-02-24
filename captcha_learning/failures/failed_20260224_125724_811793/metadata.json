@@ -1,0 +1,12 @@
+{
+  "question": "Pear",
+  "button_clicked": 3,
+  "success": false,
+  "correct_answer": 4,
+  "timestamp": "20260224_125724_811793",
+  "datetime": "2026-02-24T12:57:24.812000",
+  "auto_labeled": true,
+  "auto_label_conf": 43.38,
+  "auto_label_tool": "base-clip-realtime",
+  "labeled_at": "2026-02-24T12:57:24.954995"
+}

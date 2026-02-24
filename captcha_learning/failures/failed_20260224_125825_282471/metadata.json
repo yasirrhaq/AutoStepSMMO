@@ -1,0 +1,12 @@
+{
+  "question": "Orange",
+  "button_clicked": 1,
+  "success": false,
+  "correct_answer": 2,
+  "timestamp": "20260224_125825_282471",
+  "datetime": "2026-02-24T12:58:25.282713",
+  "auto_labeled": true,
+  "auto_label_conf": 88.53,
+  "auto_label_tool": "base-clip-realtime",
+  "labeled_at": "2026-02-24T12:58:25.423515"
+}

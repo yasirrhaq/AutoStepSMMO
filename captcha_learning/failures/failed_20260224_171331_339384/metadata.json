@@ -1,0 +1,12 @@
+{
+  "question": "Pumpkin",
+  "button_clicked": 2,
+  "success": false,
+  "correct_answer": 4,
+  "timestamp": "20260224_171331_339384",
+  "datetime": "2026-02-24T17:13:31.339575",
+  "auto_labeled": true,
+  "auto_label_conf": 95.85,
+  "auto_label_tool": "base-clip-realtime",
+  "labeled_at": "2026-02-24T17:13:31.480573"
+}

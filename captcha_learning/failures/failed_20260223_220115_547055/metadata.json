@@ -2,7 +2,9 @@
   "question": "Orange",
   "button_clicked": 3,
   "success": false,
-  "correct_answer": null,
+  "correct_answer": 2,
   "timestamp": "20260223_220115_547055",
-  "datetime": "2026-02-23T22:01:15.547277"
+  "datetime": "2026-02-23T22:01:15.547277",
+  "auto_labeled": true,
+  "labeled_at": "2026-02-24T09:25:38.572862"
 }

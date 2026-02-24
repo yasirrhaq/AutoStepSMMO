@@ -1,0 +1,12 @@
+{
+  "question": "Gun",
+  "button_clicked": 3,
+  "success": false,
+  "correct_answer": 4,
+  "timestamp": "20260224_081343_438469",
+  "datetime": "2026-02-24T08:13:43.438709",
+  "auto_labeled": true,
+  "auto_label_conf": 81.6,
+  "auto_label_tool": "base-clip-realtime",
+  "labeled_at": "2026-02-24T08:13:43.580827"
+}

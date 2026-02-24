@@ -1,0 +1,12 @@
+{
+  "question": "Fish",
+  "button_clicked": 3,
+  "success": false,
+  "correct_answer": 4,
+  "timestamp": "20260224_161233_040180",
+  "datetime": "2026-02-24T16:12:33.040371",
+  "auto_labeled": true,
+  "auto_label_conf": 95.75,
+  "auto_label_tool": "base-clip-realtime",
+  "labeled_at": "2026-02-24T16:12:39.097000"
+}

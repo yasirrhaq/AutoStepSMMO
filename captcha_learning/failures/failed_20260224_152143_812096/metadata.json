@@ -1,0 +1,12 @@
+{
+  "question": "Watermelon",
+  "button_clicked": 4,
+  "success": false,
+  "correct_answer": 2,
+  "timestamp": "20260224_152143_812096",
+  "datetime": "2026-02-24T15:21:43.812315",
+  "auto_labeled": true,
+  "auto_label_conf": 86.08,
+  "auto_label_tool": "base-clip-realtime",
+  "labeled_at": "2026-02-24T15:21:43.968856"
+}
