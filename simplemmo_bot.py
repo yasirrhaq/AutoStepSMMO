@@ -497,7 +497,7 @@ class SimpleMMOBot:
 
                 # Priority 4: text HTML contains an avatar <img> — event NPC encounter
                 # e.g. text = "<img src='/img/sprites/events/lunar-new-year-26/avatars/lantern_sage.png'>..."
-                if not npc_from_type and not npc_id and _text_has_html:
+                if not npc_id and _text_has_html:
                     _text_str = str(text)
                     # Avatar image = NPC encounter
                     _av_m = _img_re.search(r"src=['\"]([^'\"]*?/avatars/[^'\"]+)", _text_str)
