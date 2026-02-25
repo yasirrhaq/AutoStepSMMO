@@ -637,6 +637,23 @@ class BattleArenaBot:
             print(f"  Stop after wins    : {max_wins}")
         print("Press Ctrl+C to stop\n" + "=" * 60 + "\n")
 
+        # ── Fight-count prompt ───────────────────────────────────────────────
+        target_fights     = 0    # 0 = unlimited
+        continue_after    = False
+        _tf_str = input("  How many fights to run? (Enter = unlimited): ").strip()
+        if _tf_str.isdigit() and int(_tf_str) > 0:
+            target_fights = int(_tf_str)
+            _cont = input(
+                f"  Continue with unlimited battles after {target_fights} fights? (y/n): "
+            ).strip().lower()
+            continue_after = _cont == 'y'
+            if continue_after:
+                print(f"  -> Will run {target_fights} fights, then continue indefinitely.\n")
+            else:
+                print(f"  -> Will stop after {target_fights} fights.\n")
+        else:
+            print("  -> Unlimited battles.\n")
+
         # Login
         print("[Logging in...]")
         if not self.bot.login():
@@ -648,16 +665,26 @@ class BattleArenaBot:
 
         while True:
             try:
+                # Check fight-count target before starting next fight
+                if target_fights > 0 and fight_num >= target_fights:
+                    if continue_after:
+                        target_fights = 0  # switch to unlimited
+                        print(f"\n{'='*60}")
+                        print(f"  Target of {_tf_str} fights reached — continuing indefinitely.")
+                        print(f"{'='*60}\n")
+                    else:
+                        print(f"\n🏁 Reached target of {_tf_str} fights. Stopping.")
+                        break
+
                 max_wins = self.ba_config["max_wins"]
                 if max_wins and self.stats["wins"] >= max_wins:
                     print(f"\n🏁 Reached max wins ({max_wins}). Stopping.")
                     break
-
+                
                 fight_num += 1
                 print(f"\n{'─'*60}")
                 print(f"⚔️  Fight #{fight_num}  |  Total wins: {self.stats['wins']}")
                 print(f"{'─'*60}")
-
                 # 1. Resource check
                 ok = self.check_resources()
                 if ok is None:   # hard stop

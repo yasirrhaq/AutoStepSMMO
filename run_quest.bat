@@ -1,5 +1,6 @@
 @echo off
 title SimpleMMO 24/7 Quest Runner
+cls
 :: SimpleMMO Auto-Quest Runner
 :: Automatically completes quests in order from lowest to highest level
 

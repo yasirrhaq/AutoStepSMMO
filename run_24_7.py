@@ -36,11 +36,11 @@ class AFK24x7Bot:
         
         # Best practice settings
         self.travels_before_break = random.randint(100, 200)  # Random break every 100-200 travels (was 50-100)
-        self.break_duration_min = 1  # 1-3 minute breaks (was 5-10 minutes)
-        self.break_duration_max = 3
+        self.break_duration_min = self.bot.config.get("break_duration_min", 4) # (was 5-10 minutes)
+        self.break_duration_max = self.bot.config.get("break_duration_max", 12)
         
         # Session refresh interval (every 2-4 hours)
-        self.session_refresh_hours = random.uniform(2, 4)
+        self.session_refresh_hours = random.uniform(2, 5)  # Randomize between 2-5 hours to avoid fixed patterns
         self.last_session_refresh = datetime.now()
         
         # Use UTF-8 console handler so emoji never raises UnicodeEncodeError
@@ -189,7 +189,7 @@ class AFK24x7Bot:
         print("🌙 SimpleMMO 24/7 AFK MODE")
         print("="*60)
         print("Bot will run continuously with best practices:")
-        print("  ✓ Random breaks every 100-200 travels (1-3 mins)")
+        print("  ✓ Random breaks every 100-200 travels (4-12 mins)")
         print("  ✓ Session refresh every 2-4 hours")
         print("  ✓ Automatic error recovery")
         print("  ✓ CAPTCHA auto-solve enabled")
