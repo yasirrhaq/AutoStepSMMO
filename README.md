@@ -49,6 +49,10 @@ Double-click any `.bat` file to launch. When the bot stops, the window will ask:
 - Smart wait: energy-low uses `wait_minutes_low_energy`, gold-low uses `wait_minutes_low_resources`
 - Float-safe wait times (e.g. 2.5 minutes works correctly)
 - Configurable: min energy, generation cost, max attacks per NPC, attack delay, max wins cap
+- **Interactive startup prompt:**
+  - Enter a number to run that many fights then stop
+  - If a number is entered, asked whether to continue with unlimited battles after reaching the target
+  - Press Enter to run unlimited battles immediately
 - Clean Ctrl+C stop with full session stats printed before exit
 
 ### Quest Runner Bot (`quest_runner.py`)
@@ -203,22 +207,35 @@ Bot stopped gracefully. Goodbye!
 ### Battle Arena Bot
 
 ```
-------------------------------------------------------------
-[Fight #12]  Total wins: 11
-------------------------------------------------------------
-  Gold in hand    : 2,600,260
-  Generation cost : 13,750 gold per fight
-  Fights afford   : 189 fights possible
-  Energy          : 3 available (need 1)
+============================================================
+  SimpleMMO BATTLE ARENA BOT
+============================================================
+  Min energy required: 1
+  Generation cost    : 13,750 gold (fetched live each fight)
+  Wait when broke    : True
+  Attack delay       : 1.0s
+============================================================
 
-  Generating opponent...
-  Opponent: Lunar Warrior (Lvl 1,550)
-     STR: 720  |  DEF: 1,572  |  HP: 5,769
+  How many fights to run? (Enter = unlimited): 125
+  Continue with unlimited battles after 125 fights? (y/N): y
+  -> Will run 125 fights, then continue indefinitely.
 
-  Hit #  1  |  Dealt: 6,894  |  Enemy HP: 0 (0%)  |  Your HP: 7,815
-  [WIN] Victory after 1 attacks!
-  EXP: +17,723
-  Next fight in 5.1s...
+[Logging in...]
+```
+
+```
+------------------------------------------------------------
+  Fight #125  |  Total wins: 115
+------------------------------------------------------------
+  ...
+
+============================================================
+  Target of 125 fights reached — continuing indefinitely.
+============================================================
+
+  Fight #126  |  Total wins: 116
+------------------------------------------------------------
+  ...
 ```
 
 ### Quest Runner - Startup Prompt
