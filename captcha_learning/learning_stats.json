@@ -1,9 +1,9 @@
 {
-  "total_attempts": 228,
-  "total_successes": 74,
+  "total_attempts": 237,
+  "total_successes": 83,
   "total_failures": 154,
-  "auto_labeled": 99,
+  "auto_labeled": 100,
   "last_training": "2026-02-24T07:04:21.721893",
   "training_count": 2,
-  "labels_since_training": 59
+  "labels_since_training": 60
 }
