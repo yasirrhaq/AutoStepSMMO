@@ -280,6 +280,29 @@ class QuestRunner(SimpleMMOBot):
                     self.logger.debug(f"Parsed quest: {quest_data['title']} (ID: {quest_data['id']}, Level: {quest_data['level_required']}, Completed: {quest_data['is_completed']})")
             
             self.logger.info(f"Successfully parsed {len(quests)} quests")
+            
+            # Fix success rate logic: higher-level quests cannot have better success rate
+            # than lower-level quests. Cap each quest's success rate to the maximum
+            # success rate seen at all lower levels.
+            quests.sort(key=lambda q: (
+                int(str(q.get('level_required', 999999)).replace(',', '')) 
+                if q.get('level_required') else 999999,
+                q.get('id', 999999)
+            ))
+            
+            max_success_rate_seen = 100
+            for quest in quests:
+                current_rate = quest.get('success_chance', 100)
+                # Cap success rate to the maximum seen at lower levels
+                if current_rate > max_success_rate_seen:
+                    self.logger.debug(
+                        f"Adjusting success rate for '{quest['title']}' (Lvl {quest.get('level_required', '?')}): "
+                        f"{current_rate}% -> {max_success_rate_seen}% (capped by lower-level quest)"
+                    )
+                    quest['success_chance'] = max_success_rate_seen
+                else:
+                    max_success_rate_seen = current_rate
+            
             return quests
             
         except Exception as e:
@@ -410,7 +433,17 @@ class QuestRunner(SimpleMMOBot):
                 if not exp and quest_data:
                     exp = quest_data.get('experience', 0)
 
-                self.logger.info(f"Earned: {exp:,} EXP | {gold:,} Gold")
+                # Ensure exp and gold are integers for formatting (may be strings from API)
+                try:
+                    exp_int = int(str(exp).replace(',', ''))
+                except (ValueError, TypeError):
+                    exp_int = 0
+                try:
+                    gold_int = int(str(gold).replace(',', ''))
+                except (ValueError, TypeError):
+                    gold_int = 0
+
+                self.logger.info(f"Earned: {exp_int:,} EXP | {gold_int:,} Gold")
                 
                 return {
                     "success": True,
@@ -822,38 +855,112 @@ def main():
     except (AttributeError, OSError):
         pass  # SIGBREAK not available on non-Windows
 
-    # Start quest loop
-    try:
-        bot.auto_quest_loop(priority_quests=priority_quests, direction=direction)
-    except KeyboardInterrupt:
-        _completed  = getattr(bot, '_session_completed', 0)
-        _steps      = getattr(bot, '_session_steps', 0)
-        _exp        = getattr(bot, '_session_exp', 0)
-        _gold       = getattr(bot, '_session_gold', 0)
-        _qp         = getattr(bot, '_session_quest_progress', {})
-        print("\n\n" + "="*60)
-        print("Quest Runner stopped.")
-        print("="*60)
-        print(f"  Quests fully completed : {_completed}")
-        print(f"  Total attempts         : {_steps}")
-        print(f"  Total EXP              : {_exp:,}")
-        print(f"  Total Gold             : {_gold:,}")
-        if _qp:
-            print("-"*60)
-            print("  Quest Progress:")
-            for _title, _info in _qp.items():
-                _done      = _info['done']
-                _total     = _info['total']
-                _remaining = _info['remaining']
-                _icon      = "OK" if _remaining == 0 else "->"
-                _status    = "completed" if _remaining == 0 else f"{_done}/{_total} done, {_remaining} left"
-                print(f"   [{_icon}] {_title}: {_status}")
-        print("="*60)
-    except SystemExit:
-        pass  # clean shutdown via signal handler
-    except Exception as e:
-        print(f"\n\nError: {e}")
-        bot.logger.error(f"Fatal error: {e}", exc_info=True)
+    # ── Auto-restart loop ────────────────────────────────────────────────────
+    _restart_count = 0
+
+    while True:
+        if _restart_count > 0:
+            print(f"\n{'='*60}")
+            print(f"  Auto-restarting bot (restart #{_restart_count})...")
+            print(f"{'='*60}\n")
+            time.sleep(2)
+
+        # Start quest loop
+        try:
+            bot.auto_quest_loop(priority_quests=priority_quests, direction=direction)
+            # If loop completes normally (no more quests), exit
+            break
+
+        except KeyboardInterrupt:
+            _completed  = getattr(bot, '_session_completed', 0)
+            _steps      = getattr(bot, '_session_steps', 0)
+            _exp        = getattr(bot, '_session_exp', 0)
+            _gold       = getattr(bot, '_session_gold', 0)
+            _qp         = getattr(bot, '_session_quest_progress', {})
+            print("\n\n" + "="*60)
+            print("Quest Runner stopped.")
+            print("="*60)
+            print(f"  Quests fully completed : {_completed}")
+            print(f"  Total attempts         : {_steps}")
+            print(f"  Total EXP              : {_exp:,}")
+            print(f"  Total Gold             : {_gold:,}")
+            if _qp:
+                print("-"*60)
+                print("  Quest Progress:")
+                for _title, _info in _qp.items():
+                    _done      = _info['done']
+                    _total     = _info['total']
+                    _remaining = _info['remaining']
+                    _icon      = "OK" if _remaining == 0 else "->"
+                    _status    = "completed" if _remaining == 0 else f"{_done}/{_total} done, {_remaining} left"
+                    print(f"   [{_icon}] {_title}: {_status}")
+            print("="*60)
+
+            # Ask user to restart or exit
+            restart = input("\n Press Enter to restart, or C to close: ").strip().lower()
+            if restart == 'c':
+                print("\nBot stopped gracefully. Goodbye!")
+                break
+            else:
+                _restart_count += 1
+                # Re-login to refresh session
+                try:
+                    bot.login()
+                except Exception as e:
+                    print(f"\nRe-login failed: {e}")
+                    print("Please restart manually with fresh credentials.")
+                    break
+
+        except SystemExit:
+            break  # clean shutdown via signal handler
+
+        except Exception as e:
+            print(f"\n\n{'='*60}")
+            print(f"  ERROR: {e}")
+            print(f"{'='*60}")
+            bot.logger.error(f"Fatal error: {e}", exc_info=True)
+
+            # Show session stats before restart
+            _completed  = getattr(bot, '_session_completed', 0)
+            _steps      = getattr(bot, '_session_steps', 0)
+            _exp        = getattr(bot, '_session_exp', 0)
+            _gold       = getattr(bot, '_session_gold', 0)
+            _qp         = getattr(bot, '_session_quest_progress', {})
+
+            if _steps > 0 or _completed > 0:
+                print("\n" + "="*60)
+                print("  Session Stats (before error)")
+                print("="*60)
+                print(f"  Quests completed : {_completed}")
+                print(f"  Total attempts   : {_steps}")
+                print(f"  Total EXP        : {_exp:,}")
+                print(f"  Total Gold       : {_gold:,}")
+                if _qp:
+                    print("-"*60)
+                    print("  Quest Progress:")
+                    for _title, _info in _qp.items():
+                        _done      = _info['done']
+                        _total     = _info['total']
+                        _remaining = _info['remaining']
+                        _icon      = "OK" if _remaining == 0 else "->"
+                        _status    = "completed" if _remaining == 0 else f"{_done}/{_total} done, {_remaining} left"
+                        print(f"   [{_icon}] {_title}: {_status}")
+                print("="*60)
+
+            # Ask user to restart or exit
+            restart = input("\n Press Enter to restart, or C to close: ").strip().lower()
+            if restart == 'c':
+                print("\nBot stopped. Goodbye!")
+                break
+            else:
+                _restart_count += 1
+                # Re-login to refresh session
+                try:
+                    bot.login()
+                except Exception as login_err:
+                    print(f"\nRe-login failed: {login_err}")
+                    print("Please restart manually with fresh credentials.")
+                    break
 
 
 if __name__ == "__main__":
