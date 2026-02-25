@@ -2,7 +2,9 @@
   "question": "Treasure Chest",
   "button_clicked": 2,
   "success": false,
-  "correct_answer": null,
+  "correct_answer": 3,
   "timestamp": "20260223_220211_053653",
-  "datetime": "2026-02-23T22:02:11.053860"
+  "datetime": "2026-02-23T22:02:11.053860",
+  "auto_labeled": true,
+  "labeled_at": "2026-02-24T23:00:07.281077"
 }
