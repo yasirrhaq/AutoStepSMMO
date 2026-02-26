@@ -82,12 +82,19 @@ echo ============================================================
 echo  Quest runner stopped.
 echo ============================================================
 echo.
-echo  Press Enter to restart, or C to close.
+echo  Press 'Enter' to restart
+echo  otherwise it will auto restarting in 10 seconds...
 echo.
-:ask_quest
-powershell -NoProfile -Command "$k=$Host.UI.RawUI.ReadKey('NoEcho,IncludeKeyDown'); if($k.VirtualKeyCode -eq 13){exit 0}elseif($k.VirtualKeyCode -eq 67){exit 1}else{exit 2}"
-if errorlevel 2 goto ask_quest
+echo  Press 'P' to pause (wait indefinitely)
+echo  Press 'C' to close
+echo.
+
+:: Wait for key press with timeout (10 seconds)
+powershell -NoProfile -Command "$ErrorActionPreference='SilentlyContinue'; $key=$null; $sw=[System.Diagnostics.Stopwatch]::new(); $sw.Start(); while($sw.Elapsed.TotalSeconds -lt 10 -and $key -eq $null){ if([Console]::KeyAvailable){ $key=[Console]::ReadKey($true); if($key.Key -eq 'P'){ Write-Host 'Paused. Press any key to continue...'; [Console]::ReadKey($true) | Out-Null; exit 0 } elseif($key.Key -eq 'C'){ exit 1 } }; Start-Sleep -Milliseconds 100 }; if($key -eq $null){ exit 2 }"
+if errorlevel 2 goto start
 if errorlevel 1 goto end
+
+:: Auto restart
 goto start
 
 :end
