@@ -6,6 +6,33 @@ A developer/testing toolkit for automating SimpleMMO. Four fully-featured bots, 
 
 ---
 
+## 🆕 What's New (February 2026)
+
+### Web Dashboard (Coming Soon!)
+Monitor your bots from anywhere with a real-time web dashboard!
+
+- **📊 Real-time Stats** - View all bot stats live (EXP, Gold, Items, Uptime)
+- **📈 Historical Charts** - Track performance over time (24h+ history)
+- **📱 Mobile Friendly** - Access from phone, tablet, or desktop
+- **🔔 Error Alerts** - Get notified when bots encounter issues
+- **🌐 Hostinger Compatible** - Works on shared hosting (Laravel + React)
+
+**Architecture:**
+```
+Python Bots (Your PC) → HTTP API → Laravel Dashboard (Hostinger) → Web/Mobile UI
+```
+
+**Getting Started:**
+1. See [`docs/`](docs/) folder for complete documentation
+2. Start with [`docs/PRD_DASHBOARD.md`](docs/PRD_DASHBOARD.md) for requirements
+3. Follow [`docs/DASHBOARD_IMPLEMENTATION_GUIDE.md`](docs/DASHBOARD_IMPLEMENTATION_GUIDE.md) for step-by-step setup
+
+**Quick Files:**
+- [`stats_reporter.py`](stats_reporter.py) - Python module for sending stats to dashboard
+- [`docs/`](docs/) - Complete dashboard documentation
+
+---
+
 ## Bots at a Glance
 
 | Bot                | Script                | Launch                 |
@@ -302,19 +329,25 @@ Quest Runner stopped.
 ## Project Structure
 
 ```
-simplemmo_bot.py         Core bot: login, travel, NPC attack, material gather
-run_24_7.py              24/7 AFK travel loop with stats and break system
-battle_arena_bot.py      Battle Arena automation
-quest_runner.py          Quest automation
-auto_captcha_learner.py  CAPTCHA auto-label and auto-training system
-train_captcha_model.py   Fine-tune CLIP on collected labels
-config.json              All settings (shared by all bots)
-requirements.txt         Python dependencies
-run_afk.bat              Launch AFK bot (double-click)
-run_battle_arena.bat     Launch Battle Arena bot (double-click)
-run_quest.bat            Launch Quest Runner (double-click)
-captcha_learning/        Saved CAPTCHA attempt images, labels, and stats
-models/                  Fine-tuned CAPTCHA model (generated after training)
+simplemmo_bot.py              Core bot: login, travel, NPC attack, material gather
+run_24_7.py                   24/7 AFK travel loop with stats and break system
+battle_arena_bot.py           Battle Arena automation
+quest_runner.py               Quest automation
+stats_reporter.py             Dashboard integration - sends stats to web dashboard
+auto_captcha_learner.py       CAPTCHA auto-label and auto-training system
+train_captcha_model.py        Fine-tune CLIP on collected labels
+config.json                   All settings (shared by all bots)
+requirements.txt              Python dependencies
+run_afk.bat                   Launch AFK bot (double-click)
+run_battle_arena.bat          Launch Battle Arena bot (double-click)
+run_quest.bat                 Launch Quest Runner (double-click)
+captcha_learning/             Saved CAPTCHA attempt images, labels, and stats
+models/                       Fine-tuned CAPTCHA model (generated after training)
+docs/                         Web dashboard documentation (NEW!)
+  ├── PRD_DASHBOARD.md        Product requirements for web dashboard
+  ├── DASHBOARD_IMPLEMENTATION_GUIDE.md  Step-by-step setup guide
+  ├── DASHBOARD_QUICKREF.md   Quick reference guide
+  └── README.md               Documentation index
 ```
 
 ---
