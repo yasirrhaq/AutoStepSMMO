@@ -52,7 +52,9 @@ def input_with_timeout(
                 return default
 
             if msvcrt.kbhit():
-                char = msvcrt.getwche()
+                # Use getwch() instead of getwche() - getwch() does NOT echo,
+                # so we control the echo manually (prevents double echo)
+                char = msvcrt.getwch()
                 if char in ("\r", "\n"):  # Enter pressed
                     sys.stdout.write("\n")
                     sys.stdout.flush()
@@ -390,7 +392,7 @@ class QuestRunner(SimpleMMOBot):
 
             max_success_rate_seen = 100
             for quest in quests:
-                current_rate = quest.get("success_chance", 100)
+                current_rate = quest.get("success_chance", 0)
                 # Cap success rate to the maximum seen at lower levels
                 if current_rate > max_success_rate_seen:
                     self.logger.debug(
