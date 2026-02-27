@@ -6,9 +6,23 @@ Runs the bot continuously with best practices for unattended operation
 
 import time
 import random
+import json
 from datetime import datetime, timedelta
 from simplemmo_bot import SimpleMMOBot
 import logging
+
+
+def load_config():
+    """Load configuration from config.json for AFK bot settings"""
+    try:
+        with open('config.json', 'r', encoding='utf-8') as f:
+            return json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        # Return defaults if config not found or invalid
+        return {
+            "break_duration_min": 4,
+            "break_duration_max": 12,
+        }
 
 class AFK24x7Bot:
     """Wrapper for 24/7 continuous operation with best practices"""
@@ -34,10 +48,11 @@ class AFK24x7Bot:
         self.current_segment_number = 1
         self.segment_start_time = datetime.now()
         
-        # Best practice settings
+        # Best practice settings - load config independently since bot isn't initialized yet
+        config = load_config()
         self.travels_before_break = random.randint(100, 200)  # Random break every 100-200 travels (was 50-100)
-        self.break_duration_min = self.bot.config.get("break_duration_min", 4) # (was 5-10 minutes)
-        self.break_duration_max = self.bot.config.get("break_duration_max", 12)
+        self.break_duration_min = config.get("break_duration_min", 4) # (was 5-10 minutes)
+        self.break_duration_max = config.get("break_duration_max", 12)
         
         # Session refresh interval (every 2-4 hours)
         self.session_refresh_hours = random.uniform(2, 5)  # Randomize between 2-5 hours to avoid fixed patterns
