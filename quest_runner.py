@@ -412,16 +412,31 @@ class QuestRunner(SimpleMMOBot):
             self.logger.debug(traceback.format_exc())
             return []
 
-    def get_incomplete_quests(self) -> List[Dict[str, Any]]:
-        """Get list of incomplete quests sorted by level"""
+    def get_incomplete_quests(self, include_completed: bool = None) -> List[Dict[str, Any]]:
+        """Get list of quests sorted by level
+        
+        Args:
+            include_completed: If True, include completed quests. If None, uses config setting.
+        """
         all_quests = self.get_available_quests()
 
-        # Filter incomplete quests that still have steps remaining
-        incomplete = [
-            q
-            for q in all_quests
-            if not q.get("is_completed", False) and q.get("remaining", 0) > 0
-        ]
+        # Check config if not explicitly specified
+        if include_completed is None:
+            include_completed = self.config.get("quest", {}).get("include_completed_quests", False)
+
+        # Filter quests based on include_completed setting
+        if include_completed:
+            # Include all quests (both completed and incomplete)
+            filtered = all_quests
+            self.logger.info(f"Including all quests ({len(filtered)} total, including completed)")
+        else:
+            # Filter incomplete quests that still have steps remaining
+            filtered = [
+                q
+                for q in all_quests
+                if not q.get("is_completed", False) and q.get("remaining", 0) > 0
+            ]
+            self.logger.info(f"Filtering to incomplete quests only ({len(filtered)} found)")
 
         # Sort by level requirement (lowest first) — parse comma-formatted numbers like "1,001"
         # Secondary sort key: quest id (lower id = older quest = likely lower level)
@@ -441,29 +456,31 @@ class QuestRunner(SimpleMMOBot):
                 quest_id = 999999
             return (parse_level(q), quest_id)
 
-        incomplete.sort(key=sort_key)
+        filtered.sort(key=sort_key)
 
+        quest_type = "all" if include_completed else "incomplete"
         self.logger.info(
-            f"Found {len(incomplete)} incomplete quests (sorted by level):"
+            f"Found {len(filtered)} {quest_type} quests (sorted by level):"
         )
-        for quest in incomplete:
+        for quest in filtered:
+            status = "✅ DONE" if quest.get("is_completed") else f"⏳ {quest.get('remaining')} left"
             self.logger.info(
                 f"  [{parse_level(quest):>6}] {quest['title']} "
-                f"(ID={quest.get('id')}, Remaining={quest.get('remaining')}, "
-                f"Completed={quest.get('is_completed')})"
+                f"(ID={quest.get('id')}, {status})"
             )
 
         # Sanity-check: log the chosen quest clearly
-        if incomplete:
-            first = incomplete[0]
+        if filtered:
+            first = filtered[0]
+            status_str = "COMPLETED" if first.get("is_completed") else "INCOMPLETE"
             self.logger.info(
                 f"[SORT CHECK] Lowest = '{first['title']}' | "
                 f"Level raw={first.get('level_required')} parsed={parse_level(first)} | "
                 f"ID={first.get('id')} | Remaining={first.get('remaining')} | "
-                f"Completed={first.get('is_completed')}"
+                f"Status={status_str}"
             )
 
-        return incomplete
+        return filtered
 
     def perform_quest(self, quest_data: Dict[str, Any] = None) -> Dict[str, Any]:
         """
@@ -712,14 +729,15 @@ class QuestRunner(SimpleMMOBot):
                 print("  All priority quests done — resuming normal quest loop...\n")
 
         # ── Normal quest loop ────────────────────────────────────────────────
+        self.logger.info("Starting normal quest loop (incomplete quests only)...")
         while True:
             # Check if we've hit the max quest limit
             if max_quests and completed_count >= max_quests:
                 self.logger.info(f"Reached maximum quest limit ({max_quests})")
                 break
 
-            # Get incomplete quests
-            incomplete_quests = self.get_incomplete_quests()
+            # Get incomplete quests - always exclude completed to avoid infinite loops
+            incomplete_quests = self.get_incomplete_quests(include_completed=False)
 
             if not incomplete_quests:
                 self.logger.info("No more incomplete quests available!")
@@ -740,6 +758,20 @@ class QuestRunner(SimpleMMOBot):
                     f"No 100% success quest found in '{direction}' direction — "
                     f"picking '{current_quest['title']}' ({_sc}% chance) as fallback"
                 )
+
+            # Skip if quest is already completed (shouldn't happen with include_completed=False, but safety check)
+            if current_quest.get("is_completed", False) or current_quest.get("remaining", 1) <= 0:
+                self.logger.warning(
+                    f"⏩ Skipping '{current_quest['title']}' — already completed "
+                    f"(remaining={current_quest.get('remaining')}, is_completed={current_quest.get('is_completed')})"
+                )
+                # Remove from list and continue to next iteration (will re-fetch)
+                incomplete_quests = [q for q in incomplete_quests if q.get("id") != current_quest.get("id")]
+                if not incomplete_quests:
+                    self.logger.info("No more incomplete quests available!")
+                    break
+                # Continue to next iteration - the outer loop will re-fetch with fresh data
+                continue
 
             self.logger.info("")
             self.logger.info("=" * 60)

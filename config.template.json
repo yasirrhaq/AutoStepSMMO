@@ -45,7 +45,8 @@
     "delay_between_quests_min": 3,
     "delay_between_quests_max": 6,
     "qp_poll_interval": 60,
-    "error_retry_delay": 10
+    "error_retry_delay": 10,
+    "include_completed_quests": false
   },
   "_battle_arena_settings": "Settings for the Battle Arena bot (battle_arena_bot.py)",
   "battle_arena": {
@@ -59,6 +60,23 @@
     "attack_delay": 1.0,
     "between_fight_delay": 5,
     "max_wins": 0
+  },
+  "_world_boss_settings": "Settings for the World Boss bot (world_boss_bot.py)",
+  "world_boss": {
+    "check_interval": 30,
+    "min_energy": 10,
+    "use_special_attack": false,
+    "target_boss_ids": [],
+    "wait_for_next": true,
+    "max_attacks_per_boss": 1000,
+    "attack_delay": 2.0,
+    "double_attack_for_rewards": true,
+    "food_item_id": "",
+    "heal_threshold_percent": 30,
+    "_session_error_note": "Settings to prevent bot from running indefinitely when session is blocked",
+    "exit_on_session_error": true,
+    "max_session_errors": 10,
+    "session_error_backoff": 60
   },
   "_notes": {
     "base_url": "The base URL of your SimpleMMO instance",
